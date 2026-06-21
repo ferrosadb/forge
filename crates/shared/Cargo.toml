@@ -1,0 +1,18 @@
+[package]
+name = "forge-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

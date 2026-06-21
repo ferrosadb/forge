@@ -1,0 +1,10 @@
+[package]
+name = "forge-materialization-scan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+regex = { workspace = true }
+ignore = { workspace = true }

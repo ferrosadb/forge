@@ -1,0 +1,58 @@
+[package]
+name = "forge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "frg"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ignore = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+regex = { workspace = true }
+which = "7"
+forge-test-summary = { path = "../test-summary" }
+forge-log-distill = { path = "../log-distill" }
+forge-diff-filter = { path = "../diff-filter" }
+forge-lint-dedup = { path = "../lint-dedup" }
+forge-log-monitor = { path = "../log-monitor" }
+forge-coverage-gate = { path = "../coverage-gate" }
+forge-smell-detect = { path = "../smell-detect" }
+forge-doc-coverage = { path = "../doc-coverage" }
+forge-project-detect = { path = "../project-detect" }
+forge-digest = { path = "../digest" }
+forge-shared = { path = "../shared" }
+forge-ingest = { path = "../ingest" }
+forge-fmem-client = { path = "../fmem-client" }
+forge-dsm-analyze = { path = "../dsm-analyze" }
+forge-concurrency-scan = { path = "../concurrency-scan" }
+forge-outline = { path = "../outline" }
+forge-dep-tree = { path = "../dep-tree" }
+forge-mcp-server = { path = "../mcp-server" }
+forge-format-fix = { path = "../format-fix" }
+forge-merge-check = { path = "../merge-check" }
+forge-devtools = { path = "../devtools" }
+forge-mermaid-validate = { path = "../mermaid-validate" }
+forge-checklist-state = { path = "../checklist-state" }
+forge-todo-extract = { path = "../todo-extract" }
+forge-materialization-scan = { path = "../materialization-scan" }
+forge-secret-scan = { path = "../secret-scan" }
+forge-deps-audit = { path = "../deps-audit" }
+forge-threat-scan = { path = "../threat-scan" }
+forge-fail-loud-scan = { path = "../fail-loud-scan" }
+forge-schema-diff = { path = "../schema-diff" }
+forge-api-diff = { path = "../api-diff" }
+forge-tasks = { path = "../tasks" }
+toml = { workspace = true }
+globset = "0.4"
+csv = "1"
+
+[dev-dependencies]
+tempfile.workspace = true

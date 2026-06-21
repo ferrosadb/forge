@@ -1,0 +1,17 @@
+[package]
+name = "forge-api-diff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+ignore = { workspace = true }
+forge-outline = { path = "../outline" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }

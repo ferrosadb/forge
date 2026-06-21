@@ -1,0 +1,134 @@
+# Built-in tool aliases for Forge
+# These are merged with global (~/.config/forge/aliases.toml) and project-local (forge-aliases.toml) overrides
+
+[[alias]]
+from = "Edit"
+to = "foundry.edit_file"
+
+[[alias]]
+from = "Write"
+to = "foundry.write_file"
+
+[[alias]]
+from = "Read"
+to = "foundry.read_file"
+
+[[alias]]
+from = "Glob"
+to = "foundry.search_files"
+
+[[alias]]
+from = "Grep"
+to = "foundry.search_files"
+
+[[alias]]
+from = "Bash"
+to = "foundry.execute_command"
+
+[[alias]]
+from = "LS"
+to = "foundry.list_directory"
+
+[[alias]]
+from = "list_dir"
+to = "foundry.list_directory"
+
+[[alias]]
+from = "search"
+to = "foundry.search_files"
+
+[[alias]]
+from = "edit"
+to = "foundry.edit_file"
+
+[[alias]]
+from = "write"
+to = "foundry.write_file"
+
+[[alias]]
+from = "read"
+to = "foundry.read_file"
+
+[[alias]]
+from = "run"
+to = "foundry.execute_command"
+
+[[alias]]
+from = "execute"
+to = "foundry.execute_command"
+
+[[alias]]
+from = "digest"
+to = "forge.digest"
+
+[[alias]]
+from = "outline"
+to = "forge.outline"
+
+[[alias]]
+from = "smell"
+to = "forge.smell_detect"
+
+[[alias]]
+from = "deps"
+to = "forge.dep_tree"
+
+[[alias]]
+from = "dsm"
+to = "forge.dsm_analyze"
+
+[[alias]]
+from = "todo"
+to = "forge.todo_extract"
+
+[[alias]]
+from = "audit"
+to = "forge.deps_audit"
+
+[[alias]]
+from = "secrets"
+to = "forge.secret_scan"
+
+[[alias]]
+from = "threats"
+to = "forge.threat_scan"
+
+[[alias]]
+from = "fail_loud"
+to = "forge.fail_loud_scan"
+
+[[alias]]
+from = "footguns"
+to = "forge.fail_loud_scan"
+
+[[alias]]
+from = "forge_clippy"
+to = "cargo"
+
+[[alias]]
+from = "clippy"
+to = "cargo"
+
+[[alias]]
+from = "todo_write"
+to = "todowrite"
+
+[[alias]]
+from = "todo"
+to = "todowrite"
+
+[[alias]]
+from = "TodoWrite"
+to = "todowrite"
+
+[[alias]]
+from = "tools"
+to = "forge.list"
+
+[[alias]]
+from = "tools_list"
+to = "forge.list"
+
+[[alias]]
+from = "ls_tools"
+to = "forge.list"

@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cli",
+    "crates/shared",
+    "crates/test-summary",
+    "crates/log-distill",
+    "crates/diff-filter",
+    "crates/lint-dedup",
+    "crates/log-monitor",
+    "crates/coverage-gate",
+    "crates/smell-detect",
+    "crates/doc-coverage",
+    "crates/project-detect",
+    "crates/digest",
+    "crates/dsm-analyze",
+    "crates/concurrency-scan",
+    "crates/fail-loud-scan",
+    "crates/mcp-server",
+    "crates/dep-tree",
+    "crates/outline",
+    "crates/format-fix",
+    "crates/merge-check",
+    "crates/ingest",
+    "crates/devtools",
+    "crates/fmem-client",
+    "crates/tasks",
+    "crates/materialization-scan",
+]
+
+[workspace.package]
+version = "0.13.5"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+dirs = "5"
+toml = "0.8"
+tempfile = "3"
