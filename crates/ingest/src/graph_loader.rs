@@ -23,7 +23,7 @@
 //!
 //! ## Zero-regression guarantee
 //!
-//! The existing [`crate::loader`] (Python/CQL path) is the default for all
+//! The existing Python/CQL loader path is the default for all
 //! existing callers.  [`GraphLoader`] is ONLY invoked when the caller
 //! explicitly opts in via `IngestMode::CodeGraph` (or the `--graph-loader` CLI
 //! flag).  No existing behaviour changes.
