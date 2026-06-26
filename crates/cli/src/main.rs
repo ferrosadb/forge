@@ -396,6 +396,21 @@ enum Commands {
         dry_run: bool,
     },
 
+    /// Fetch a web page as trusted read-only text (no persistence)
+    FetchUrl {
+        /// URL to fetch and extract
+        url: String,
+    },
+
+    /// Search via an explicitly configured trusted backend (SearXNG)
+    WebSearch {
+        /// Search query
+        query: String,
+        /// Maximum number of results to return
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
+
     /// Ingest an academic paper into a knowledge graph
     IngestPaper {
         /// URL, DOI (doi:10.xxx), arxiv ID, or local PDF path
@@ -2630,6 +2645,42 @@ fn run_mcp_server() -> anyhow::Result<()> {
             let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let report = forge_ingest::url::extract_url_with_depth(url, depth).map_err(|e| e.to_string())?;
             persist_or_report(report, &args, "ingest-url")
+        }
+    );
+
+    // fetch_url — trusted read-only web extraction without KG persistence
+    register_tool!(server, "fetch_url",
+        "Fetch a web page through Forge's trusted HTTP path and return compact read-only text, sections, and links. Does not persist to ferrosa-memory, does not call third-party extraction providers, and does not invoke an auxiliary LLM.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch and extract"}
+            },
+            "required": ["url"]
+        }),
+        |args| {
+            let url = args.get("url").and_then(|v| v.as_str()).ok_or("url is required")?;
+            let result = forge_ingest::url::fetch_url(url).map_err(|e| e.to_string())?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+    );
+
+    // web_search — URL discovery through an explicitly configured trusted backend
+    register_tool!(server, "web_search",
+        "Search for URLs using a trusted user-configured SearXNG backend. Fails loud unless FORGE_WEB_SEARCH_URL or SEARXNG_URL is configured; Forge ships with no default third-party search provider.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "limit": {"type": "integer", "description": "Maximum number of results to return (default 5, max 50)"}
+            },
+            "required": ["query"]
+        }),
+        |args| {
+            let query = args.get("query").and_then(|v| v.as_str()).ok_or("query is required")?;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            let result = forge_ingest::url::trusted_web_search(query, limit).map_err(|e| e.to_string())?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         }
     );
 
@@ -4973,6 +5024,14 @@ fn main() -> anyhow::Result<()> {
                     load_report_via_mcp(report, mcp_bin, session, tenant, "ingest-url")?;
                 println!("{}", forge_shared::emit_json(&load_report, cli.pretty)?);
             }
+        }
+        Commands::FetchUrl { url } => {
+            let result = forge_ingest::url::fetch_url(&url)?;
+            println!("{}", forge_shared::emit_json(&result, cli.pretty)?);
+        }
+        Commands::WebSearch { query, limit } => {
+            let result = forge_ingest::url::trusted_web_search(&query, limit)?;
+            println!("{}", forge_shared::emit_json(&result, cli.pretty)?);
         }
         Commands::IngestPaper {
             input,

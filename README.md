@@ -106,8 +106,22 @@ These commands ingest structured knowledge into ferrosa-memory via the `agent_me
 | `frg ingest [dir]` | Ingest codebase structure: modules, functions, types, and their relationships as typed entities and edges |
 | `frg ingest-descriptions [file]` | LLM-backed one-line descriptions for public entities; uses a local Ollama model; validates ≤60 words, rejects prompt-leak strings |
 | `frg ingest-url <url>` | Fetch a web page and ingest its structure and concepts as entities |
+| `frg fetch-url <url>` | Fetch a web page through Forge's trusted HTTP path and return compact read-only text, sections, and links without persistence |
+| `frg web-search <query>` | Search for candidate URLs through an explicitly configured trusted SearXNG backend (`FORGE_WEB_SEARCH_URL` or `SEARXNG_URL`) |
 | `frg ingest-paper <source>` | Ingest an academic paper (see [PDF ingestion](#pdf-ingestion)) |
 | `frg ingest-corpus <path>` | Ingest corpus markdown distillation files; creates L1/L2/L3 entities with deterministic UUID5 IDs |
+
+`ingest-url` and `fetch-url` share Forge's SSRF guard, sensitive-query stripping,
+5 MB response cap, prompt-injection sanitization, and relative-link resolution.
+Use `ingest-url` when the page should become durable ferrosa-memory knowledge;
+use `fetch-url` when an agent only needs to read the page in the current turn.
+Forge ships with no default search provider: `web-search` fails loud until a
+user-owned/trusted SearXNG endpoint is configured. SearXNG result titles,
+snippets, engines, and URLs are treated as hostile web content: Forge strips
+active/hidden markup, removes control characters, decodes entities, blocks
+prompt-injection patterns, strips sensitive URL query parameters, caps returned
+text, and returns only a deterministic extractive `summary` generated from the
+scrubbed text. No LLM summarizer is invoked in the search path.
 
 ### Task and workflow management
 
@@ -197,6 +211,8 @@ The MCP server (activated by `frg run`) exposes the same functionality directly 
 | `mermaid_validate` | `frg mermaid-validate` |
 | `ingest` | `frg ingest` |
 | `ingest_url` | `frg ingest-url` |
+| `fetch_url` | `frg fetch-url` |
+| `web_search` | `frg web-search` |
 | `ingest_paper` | `frg ingest-paper` |
 | `ingest_corpus` | `frg ingest-corpus` |
 | `task_create` | `frg task create` |
