@@ -107,6 +107,25 @@ impl TaskStore {
         Ok(store)
     }
 
+    /// The driver's live view of the board cluster, derived from the topology it
+    /// discovered via `system.peers` (the advertised client addresses, so this is
+    /// NAT/Docker-correct): how many nodes are known and how many are up.
+    /// `Node::is_down()` is the driver's own liveness marker — the same topology
+    /// it routes queries over, so it can't disagree with reality.
+    pub fn board_health(&self) -> crate::debug_stop::BoardHealth {
+        let cluster = self.session.get_cluster_data();
+        let nodes = cluster.get_nodes_info();
+        let nodes_total = nodes.len();
+        let nodes_up = nodes
+            .iter()
+            .filter(|n| n.is_enabled() && !n.is_down())
+            .count();
+        crate::debug_stop::BoardHealth {
+            nodes_up,
+            nodes_total,
+        }
+    }
+
     /// Create the three task tables if they don't exist (idempotent).
     fn ensure_schema(&self) -> Result<()> {
         for stmt in [
