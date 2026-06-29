@@ -1,10 +1,10 @@
 //! Typed wrappers over fmem MCP tools.
 //!
 //! - [`initialize`] — MCP handshake + protocol version assert (P3).
-//! - [`ingest_skill`] — ingest a skill entity (P5). fmem Sprint 2.
-//! - [`ensure_parent_tag`] — idempotent PARENT_TAG edge creation by
+//! - [`ingest_skill()`] — ingest a skill entity (P5). fmem Sprint 2.
+//! - [`ensure_parent_tag()`] — idempotent PARENT_TAG edge creation by
 //!   name (P5a). fmem `skill-ingest-support`.
-//! - [`verify_skill`] — read a skill's graph neighborhood for the
+//! - [`verify_skill()`] — read a skill's graph neighborhood for the
 //!   verification phase (P5b). fmem `skill-ingest-support`.
 
 pub mod batch_delete_entities;
