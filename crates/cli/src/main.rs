@@ -2749,9 +2749,9 @@ fn run_mcp_server() -> anyhow::Result<()> {
             "required": ["title"]
         }),
         |args| {
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
-            let store = forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
+            let store = forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let req = forge_tasks::CreateTaskRequest {
                 title: args.get("title").and_then(|v| v.as_str()).ok_or("title is required")?.to_string(),
                 body: args.get("body").and_then(|v| v.as_str()).map(str::to_string),
@@ -2796,9 +2796,9 @@ fn run_mcp_server() -> anyhow::Result<()> {
         }),
         |args| {
             let task_id = args.get("task_id").and_then(|v| v.as_str()).ok_or("task_id is required")?;
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
-            let store = forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
+            let store = forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let patch = forge_tasks::UpdateTaskPatch {
                 status: args.get("status").and_then(|v| v.as_str()).map(str::to_string),
                 assignee: args.get("assignee").and_then(|v| v.as_str()).map(str::to_string),
@@ -2833,10 +2833,10 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 .get("task_id")
                 .and_then(|v| v.as_str())
                 .ok_or("task_id is required")?;
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store =
-                forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+                forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let task = store.get_task(task_id).map_err(|e| e.to_string())?;
             serde_json::to_string_pretty(&task).map_err(|e| e.to_string())
         }
@@ -2859,10 +2859,10 @@ fn run_mcp_server() -> anyhow::Result<()> {
             }
         }),
         |args| {
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store =
-                forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+                forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let filter = forge_tasks::TaskFilter {
                 status: args
                     .get("status")
@@ -2913,10 +2913,10 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 .get("child_id")
                 .and_then(|v| v.as_str())
                 .ok_or("child_id is required")?;
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store =
-                forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+                forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             store
                 .link_tasks(parent_id, child_id, "child")
                 .map_err(|e| e.to_string())?;
@@ -2950,10 +2950,10 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 .get("child_id")
                 .and_then(|v| v.as_str())
                 .ok_or("child_id is required")?;
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store =
-                forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+                forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             store
                 .unlink_tasks(parent_id, child_id)
                 .map_err(|e| e.to_string())?;
@@ -2992,10 +2992,10 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 .get("author")
                 .and_then(|v| v.as_str())
                 .unwrap_or("agent");
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store =
-                forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+                forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let comment = store
                 .add_comment(task_id, author, body)
                 .map_err(|e| e.to_string())?;
@@ -3013,9 +3013,9 @@ fn run_mcp_server() -> anyhow::Result<()> {
             }
         }),
         |args| {
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
-            let store = forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
+            let store = forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let board = store.board().map_err(|e| e.to_string())?;
             serde_json::to_string_pretty(&board).map_err(|e| e.to_string())
         }
@@ -5620,7 +5620,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let req = forge_tasks::CreateTaskRequest {
@@ -5653,7 +5653,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let patch = forge_tasks::UpdateTaskPatch {
@@ -5673,7 +5673,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
 
         TaskAction::Get { task_id, cql_host } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let task = store.get_task(&task_id)?;
@@ -5689,7 +5689,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let filter = forge_tasks::TaskFilter {
@@ -5709,7 +5709,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             store.link_tasks(&parent_id, &child_id, "child")?;
@@ -5722,7 +5722,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             store.unlink_tasks(&parent_id, &child_id)?;
@@ -5736,7 +5736,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let comment = store.add_comment(&task_id, &author, &body)?;
@@ -5745,7 +5745,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
 
         TaskAction::Board { cql_host } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let board = store.board()?;
