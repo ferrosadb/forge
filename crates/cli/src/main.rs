@@ -1515,6 +1515,22 @@ fn record_mcp_analytics(tool_name: &str, raw_input_bytes: usize, output_json: &s
     }
 }
 
+/// Apply `debug_stop` board-health alerting to a task-tool result. When enabled
+/// (per-call `debug_stop` arg, else `FORGE_DEBUG_STOP`/`.forge/config.toml`),
+/// reads the driver's live board health and attaches a `debug_stop_alert`
+/// (degraded) or fails the call (critical) so the agent stops and investigates.
+fn finish_task<T: serde::Serialize>(
+    store: &forge_tasks::TaskStore,
+    args: &serde_json::Value,
+    value: &T,
+) -> Result<String, String> {
+    let on = forge_tasks::resolve_debug_stop(args.get("debug_stop").and_then(|v| v.as_bool()));
+    let v = serde_json::to_value(value).map_err(|e| e.to_string())?;
+    let out =
+        forge_tasks::apply_debug_stop(Ok(v), &store.board_health(), on).map_err(|(_, m)| m)?;
+    serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
+}
+
 /// Run forge as an MCP server over stdio, exposing all commands as tools.
 fn run_mcp_server() -> anyhow::Result<()> {
     use forge_mcp_server::{McpServer, ToolDef};
@@ -2744,7 +2760,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 "parents":        {"type": "array",   "items": {"type": "string"}, "description": "Parent task IDs to link to"},
                 "skills":         {"type": "array",   "items": {"type": "string"}, "description": "Related skill names"},
                 "created_by":     {"type": "string",  "description": "Creator identifier (default: agent)"},
-                "cql_host":       {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host":       {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop":     {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["title"]
         }),
@@ -2770,7 +2787,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 }),
             };
             let task = store.create_task(req).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&task).map_err(|e| e.to_string())
+            finish_task(&store, &args,&task)
         }
     );
 
@@ -2790,7 +2807,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 "block_reason": {"type": "string",  "description": "Block reason (use with status=blocked)"},
                 "result":       {"type": "string",  "description": "Result summary"},
                 "summary":      {"type": "string",  "description": "Task summary"},
-                "cql_host":     {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host":     {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop":   {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["task_id"]
         }),
@@ -2811,7 +2829,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 summary: args.get("summary").and_then(|v| v.as_str()).map(str::to_string),
             };
             let task = store.update_task(task_id, patch).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&task).map_err(|e| e.to_string())
+            finish_task(&store, &args,&task)
         }
     );
 
@@ -2824,7 +2842,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
             "type": "object",
             "properties": {
                 "task_id":  {"type": "string", "description": "Task ID (e.g. t_1a2b3c4d)"},
-                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["task_id"]
         }),
@@ -2838,7 +2857,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
             let store =
                 forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let task = store.get_task(task_id).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&task).map_err(|e| e.to_string())
+            finish_task(&store, &args, &task)
         }
     );
 
@@ -2855,7 +2874,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 "priority_gte": {"type": "integer", "description": "Minimum priority (inclusive)"},
                 "priority_lte": {"type": "integer", "description": "Maximum priority (inclusive)"},
                 "limit":        {"type": "integer", "description": "Max results (default 50)"},
-                "cql_host":     {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host":     {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop":   {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             }
         }),
         |args| {
@@ -2886,7 +2906,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
                     .map(|i| i as usize),
             };
             let tasks = store.list_tasks(filter).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&tasks).map_err(|e| e.to_string())
+            finish_task(&store, &args, &tasks)
         }
     );
 
@@ -2900,7 +2920,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
             "properties": {
                 "parent_id": {"type": "string", "description": "Parent task ID"},
                 "child_id":  {"type": "string", "description": "Child task ID"},
-                "cql_host":  {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host":  {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["parent_id", "child_id"]
         }),
@@ -2920,9 +2941,10 @@ fn run_mcp_server() -> anyhow::Result<()> {
             store
                 .link_tasks(parent_id, child_id, "child")
                 .map_err(|e| e.to_string())?;
-            Ok(
-                serde_json::json!({"ok": true, "parent_id": parent_id, "child_id": child_id})
-                    .to_string(),
+            finish_task(
+                &store,
+                &args,
+                &serde_json::json!({"ok": true, "parent_id": parent_id, "child_id": child_id}),
             )
         }
     );
@@ -2937,7 +2959,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
             "properties": {
                 "parent_id": {"type": "string", "description": "Parent task ID"},
                 "child_id":  {"type": "string", "description": "Child task ID"},
-                "cql_host":  {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host":  {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["parent_id", "child_id"]
         }),
@@ -2957,9 +2980,10 @@ fn run_mcp_server() -> anyhow::Result<()> {
             store
                 .unlink_tasks(parent_id, child_id)
                 .map_err(|e| e.to_string())?;
-            Ok(
-                serde_json::json!({"ok": true, "parent_id": parent_id, "child_id": child_id})
-                    .to_string(),
+            finish_task(
+                &store,
+                &args,
+                &serde_json::json!({"ok": true, "parent_id": parent_id, "child_id": child_id}),
             )
         }
     );
@@ -2975,7 +2999,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 "task_id":  {"type": "string", "description": "Task ID"},
                 "author":   {"type": "string", "description": "Comment author (default: agent)"},
                 "body":     {"type": "string", "description": "Comment text"},
-                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["task_id", "body"]
         }),
@@ -2999,7 +3024,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
             let comment = store
                 .add_comment(task_id, author, body)
                 .map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&comment).map_err(|e| e.to_string())
+            finish_task(&store, &args, &comment)
         }
     );
 
@@ -3009,7 +3034,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             }
         }),
         |args| {
@@ -3017,7 +3043,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store = forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let board = store.board().map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&board).map_err(|e| e.to_string())
+            finish_task(&store, &args,&board)
         }
     );
 
