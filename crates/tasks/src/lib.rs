@@ -9,7 +9,7 @@ mod schema;
 mod store;
 mod types;
 
-pub use config::{resolve_cql_host, resolve_cql_hosts, DEFAULT_CQL_HOST};
+pub use config::{resolve_cql_host, resolve_cql_hosts, resolve_debug_stop, DEFAULT_CQL_HOST};
 pub use debug_stop::{apply_debug_stop, BoardHealth, DEBUG_STOP_CRITICAL};
 pub use store::TaskStore;
 pub use types::{
