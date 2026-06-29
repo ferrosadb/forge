@@ -8,7 +8,7 @@ mod schema;
 mod store;
 mod types;
 
-pub use config::{resolve_cql_host, DEFAULT_CQL_HOST};
+pub use config::{resolve_cql_host, resolve_cql_hosts, DEFAULT_CQL_HOST};
 pub use store::TaskStore;
 pub use types::{
     Comment, CreateTaskRequest, KanbanBoard, Task, TaskFilter, TaskStatus, TaskWithLinks,

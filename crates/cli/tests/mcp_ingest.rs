@@ -94,6 +94,33 @@ fn ingest_tool_appears_in_tools_list() {
         "ingest_url tool should have a 'dry_run' property for extraction-only mode"
     );
 
+    let fetch_url = tools.iter().find(|t| t["name"] == "fetch_url");
+    assert!(
+        fetch_url.is_some(),
+        "fetch_url tool must appear in tools/list"
+    );
+    assert!(
+        fetch_url.unwrap()["inputSchema"]["properties"]
+            .get("url")
+            .is_some(),
+        "fetch_url tool should have a 'url' property"
+    );
+
+    let web_search = tools.iter().find(|t| t["name"] == "web_search");
+    assert!(
+        web_search.is_some(),
+        "web_search tool must appear in tools/list"
+    );
+    let search_schema = &web_search.unwrap()["inputSchema"];
+    assert!(
+        search_schema["properties"].get("query").is_some(),
+        "web_search tool should have a 'query' property"
+    );
+    assert!(
+        search_schema["properties"].get("limit").is_some(),
+        "web_search tool should have a 'limit' property"
+    );
+
     // ingest_paper has the same persistence contract.
     let ingest_paper = tools.iter().find(|t| t["name"] == "ingest_paper");
     assert!(

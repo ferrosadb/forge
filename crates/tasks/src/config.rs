@@ -67,6 +67,30 @@ pub fn resolve_cql_host(explicit: Option<&str>) -> String {
     pick(explicit, env, file)
 }
 
+/// Split a (possibly comma-separated) contact-point string into individual
+/// `host:port` entries, dropping blanks. A single host yields a one-element vec.
+fn split_hosts(s: &str) -> Vec<String> {
+    s.split(',')
+        .filter_map(|h| non_blank(h.to_string()))
+        .collect()
+}
+
+/// Resolve the effective CQL contact points for the task store.
+///
+/// Any layer may supply a comma-separated list (e.g.
+/// `cql_host = "n1:19042,n2:19042,n3:19042"`). Passing every node lets the driver
+/// bootstrap from whichever is up and fail over for queries, so the board
+/// survives a single node loss instead of dying with one fixed contact point.
+/// Always returns at least one entry (the resolved value, or [`DEFAULT_CQL_HOST`]).
+pub fn resolve_cql_hosts(explicit: Option<&str>) -> Vec<String> {
+    let hosts = split_hosts(&resolve_cql_host(explicit));
+    if hosts.is_empty() {
+        vec![DEFAULT_CQL_HOST.to_string()]
+    } else {
+        hosts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +125,27 @@ mod tests {
             "f:3"
         );
         assert_eq!(pick(Some("  "), Some("  ".into()), None), DEFAULT_CQL_HOST);
+    }
+
+    #[test]
+    fn split_hosts_single_and_list_and_blanks() {
+        assert_eq!(split_hosts("h:1"), vec!["h:1"]);
+        assert_eq!(
+            split_hosts("n1:19042, n2:19042 ,n3:19042"),
+            vec!["n1:19042", "n2:19042", "n3:19042"]
+        );
+        assert_eq!(split_hosts("a:1,,  ,b:2"), vec!["a:1", "b:2"]);
+        assert!(split_hosts("   ").is_empty());
+    }
+
+    #[test]
+    fn resolve_hosts_always_nonempty() {
+        // A single explicit host yields one contact point; the list form yields many.
+        assert_eq!(resolve_cql_hosts(Some("h:1")), vec!["h:1"]);
+        assert_eq!(
+            resolve_cql_hosts(Some("n1:19042,n2:19042,n3:19042")),
+            vec!["n1:19042", "n2:19042", "n3:19042"]
+        );
     }
 
     #[test]
