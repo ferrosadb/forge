@@ -80,6 +80,26 @@ pub fn find_dead_code(
         }
     }
 
+    // 2b. A module is alive when any of its members is alive: for every
+    //     declaration whose fully-qualified name sits under a declared
+    //     module, add a member -> module edge (`mod operator;` holding only
+    //     `impl` blocks is reachable through its methods even though the
+    //     module name never appears in a path).
+    let module_names: HashSet<&str> = declarations
+        .iter()
+        .filter(|d| d.kind == DeclarationKind::Module)
+        .map(|d| d.name.as_str())
+        .collect();
+    for decl in declarations {
+        let mut prefix = decl.name.as_str();
+        while let Some(pos) = prefix.rfind("::") {
+            prefix = &prefix[..pos];
+            if module_names.contains(prefix) && prefix != decl.name.as_str() {
+                graph.entry(decl.name.as_str()).or_default().insert(prefix);
+            }
+        }
+    }
+
     // 3. Identify entry points
     let entry_points: Vec<&str> = declarations
         .iter()
@@ -169,7 +189,8 @@ pub fn find_dead_code(
 
 /// Check if a declaration is test-related.
 fn is_test_declaration(decl: &Declaration) -> bool {
-    decl.entry_point_reason.as_deref() == Some("test function")
+    decl.is_test
+        || decl.entry_point_reason.as_deref() == Some("test function")
         || decl.file.contains("/tests/")
         || decl.file.contains("_test.")
         || decl.file.contains("test_")
@@ -215,6 +236,7 @@ mod tests {
             language: Language::Rust,
             is_entry_point: is_entry,
             entry_point_reason: ep_reason.map(|s| s.to_string()),
+            is_test: false,
         }
     }
 

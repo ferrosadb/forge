@@ -333,6 +333,196 @@ fn walkdir_rs(dir: &Path) -> Vec<std::path::PathBuf> {
     super::java::walkdir(dir, "rs")
 }
 
+/// Compute, for each 0-based line index, whether the line falls inside a
+/// `#[cfg(test)]` item (the attribute line through the end of the annotated
+/// item, tracked by brace depth).
+///
+/// Regex-level precision: braces inside string literals or comments can
+/// shift the detected item boundary. This errs on marking too much as test
+/// code, which suppresses findings rather than inventing them.
+fn cfg_test_line_flags(lines: &[&str]) -> Vec<bool> {
+    let mut flags = vec![false; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].contains("#[cfg(test)]") && !lines[i].contains("#[cfg(all(test") {
+            i += 1;
+            continue;
+        }
+        let mut depth: i32 = 0;
+        let mut body_started = false;
+        let mut j = i;
+        while j < lines.len() {
+            flags[j] = true;
+            let mut item_ends_here = false;
+            for ch in lines[j].chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        body_started = true;
+                    }
+                    '}' => {
+                        depth -= 1;
+                        if body_started && depth == 0 {
+                            item_ends_here = true;
+                        }
+                    }
+                    // `#[cfg(test)] mod tests;` — an out-of-line item ends
+                    // at the semicolon before any body opens.
+                    ';' if !body_started && depth == 0 => {
+                        item_ends_here = true;
+                    }
+                    _ => {}
+                }
+            }
+            if item_ends_here {
+                break;
+            }
+            j += 1;
+        }
+        i = j + 1;
+    }
+    flags
+}
+
+/// Check the attribute lines directly above a const/static declaration for
+/// markers that keep the item alive without any code reference:
+/// `#[global_allocator]`, `#[used]`, `#[no_mangle]`, `#[link_section = …]`,
+/// `#[panic_handler]`.
+fn linker_retained_entry_point(lines: &[&str], decl_line: usize) -> (bool, Option<String>) {
+    // `decl_line` is 1-based; scan up to 3 attribute lines above it.
+    let end = decl_line.saturating_sub(1); // 0-based index of the decl line
+    let start = end.saturating_sub(3);
+    for &l in lines.iter().take(end).skip(start) {
+        let t = l.trim_start();
+        if t.starts_with("#[global_allocator]") {
+            return (true, Some("global allocator".to_string()));
+        }
+        if t.starts_with("#[used") || t.starts_with("#[link_section") {
+            return (true, Some("linker-retained static".to_string()));
+        }
+        if t.starts_with("#[no_mangle]") || t.starts_with("#[panic_handler]") {
+            return (true, Some("FFI export".to_string()));
+        }
+    }
+    (false, None)
+}
+
+/// Compute, for each 0-based line index, whether the line falls inside an
+/// `impl` block body (tracked by brace depth on comment/string-stripped
+/// lines). Used to skip associated `type`/`const` items, which are not
+/// standalone declarations (`impl Deref for S { type Target = …; }`).
+fn impl_body_line_flags(cleaned_lines: &[String]) -> Vec<bool> {
+    let impl_start =
+        regex::Regex::new(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?impl\b").expect("regex");
+    let mut flags = vec![false; cleaned_lines.len()];
+    let mut i = 0;
+    while i < cleaned_lines.len() {
+        if !impl_start.is_match(&cleaned_lines[i]) {
+            i += 1;
+            continue;
+        }
+        let mut depth: i32 = 0;
+        let mut body_started = false;
+        let mut j = i;
+        while j < cleaned_lines.len() {
+            flags[j] = true;
+            let mut ends_here = false;
+            for ch in cleaned_lines[j].chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        body_started = true;
+                    }
+                    '}' => {
+                        depth -= 1;
+                        if body_started && depth == 0 {
+                            ends_here = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if ends_here {
+                break;
+            }
+            j += 1;
+        }
+        i = j + 1;
+    }
+    flags
+}
+
+/// Strip line comments, block comments, and double-quoted string literals
+/// from source lines (best effort at regex-level precision) so identifiers
+/// appearing only in comments or strings do not count as references.
+///
+/// Known imprecision: raw strings (`r#"…"#`), multi-line string literals,
+/// and quote characters inside char literals are handled approximately.
+fn clean_source_lines(content: &str) -> Vec<String> {
+    let mut cleaned = Vec::with_capacity(content.lines().count());
+    let mut in_block_comment = false;
+    for line in content.lines() {
+        let mut out = String::with_capacity(line.len());
+        let mut chars = line.chars().peekable();
+        let mut in_string = false;
+        while let Some(c) = chars.next() {
+            if in_block_comment {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    in_block_comment = false;
+                }
+                continue;
+            }
+            if in_string {
+                if c == '\\' {
+                    chars.next();
+                } else if c == '"' {
+                    in_string = false;
+                } else if c == '{' {
+                    // Preserve inline format-string interpolations
+                    // (`format!("{prefix}/{MANIFEST_PATH}")`) — they are
+                    // real identifier uses. `{{` is a literal brace.
+                    if chars.peek() == Some(&'{') {
+                        chars.next();
+                    } else {
+                        let mut ident = String::new();
+                        while let Some(&nc) = chars.peek() {
+                            if nc.is_alphanumeric() || nc == '_' {
+                                ident.push(nc);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        if !ident.is_empty() && matches!(chars.peek(), Some(&'}') | Some(&':')) {
+                            out.push(' ');
+                            out.push_str(&ident);
+                            out.push(' ');
+                        }
+                    }
+                }
+                continue;
+            }
+            match c {
+                '/' if chars.peek() == Some(&'/') => break,
+                '/' if chars.peek() == Some(&'*') => {
+                    chars.next();
+                    in_block_comment = true;
+                }
+                '"' => {
+                    in_string = true;
+                    out.push(' ');
+                }
+                _ => out.push(c),
+            }
+        }
+        // A string literal that opened on this line is assumed to close on
+        // it too (multi-line literals are rare in reference positions).
+        cleaned.push(out);
+    }
+    cleaned
+}
+
 // ---------------------------------------------------------------------------
 // DeclarationExtractor implementation
 // ---------------------------------------------------------------------------
@@ -343,16 +533,21 @@ impl DeclarationExtractor for RustExtractor {
     }
 
     fn extract_declarations(&self, dir: &Path, config: &ExtractConfig) -> Result<Vec<Declaration>> {
+        // `fn` may be preceded by any combination of const/async/unsafe/extern.
         let fn_re = regex::Regex::new(
-            r"(?m)^[ \t]*(pub(?:\(crate\)|\(super\))?\s+)?(?:async\s+)?fn\s+(\w+)",
+            r#"(?m)^[ \t]*(pub(?:\(crate\)|\(super\))?\s+)?(?:default\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+"[^"]*"\s+)?fn\s+(\w+)"#,
         )?;
         let type_re = regex::Regex::new(
             r"(?m)^[ \t]*(pub(?:\(crate\)|\(super\))?\s+)?(?:struct|enum|union|type)\s+(\w+)",
         )?;
-        let trait_re =
-            regex::Regex::new(r"(?m)^[ \t]*(pub(?:\(crate\)|\(super\))?\s+)?trait\s+(\w+)")?;
+        let trait_re = regex::Regex::new(
+            r"(?m)^[ \t]*(pub(?:\(crate\)|\(super\))?\s+)?(?:unsafe\s+)?trait\s+(\w+)",
+        )?;
+        // Constants and statics always carry a type annotation (`const NAME:
+        // Type = …`), so requiring the `:` rejects `const fn` (a function)
+        // while `(?:mut\s+)?` handles `static mut NAME: …`.
         let const_re = regex::Regex::new(
-            r"(?m)^[ \t]*(pub(?:\(crate\)|\(super\))?\s+)?(?:const|static)\s+(\w+)",
+            r"(?m)^[ \t]*(pub(?:\(crate\)|\(super\))?\s+)?(?:const|static)\s+(?:mut\s+)?([A-Za-z_]\w*)\s*:",
         )?;
         let mod_re = regex::Regex::new(r"(?m)^[ \t]*(pub(?:\(crate\)|\(super\))?\s+)?mod\s+(\w+)")?;
 
@@ -362,6 +557,7 @@ impl DeclarationExtractor for RustExtractor {
         let attr_no_mangle_re = regex::Regex::new(r"#\[no_mangle\]")?;
         let attr_wasm_re = regex::Regex::new(r"#\[wasm_bindgen")?;
 
+        let exclude_globs = compile_exclude_globs(&config.exclude_patterns)?;
         let mut declarations = Vec::new();
 
         for entry in walkdir_rs(dir) {
@@ -369,10 +565,14 @@ impl DeclarationExtractor for RustExtractor {
                 .strip_prefix(dir)
                 .unwrap_or(&entry)
                 .to_string_lossy()
-                .to_string();
+                .replace('\\', "/");
 
             // Skip target/ directory
-            if rel.starts_with("target/") || rel.starts_with("target\\") {
+            if rel.starts_with("target/") {
+                continue;
+            }
+
+            if path_is_excluded(&rel, &exclude_globs) {
                 continue;
             }
 
@@ -385,7 +585,27 @@ impl DeclarationExtractor for RustExtractor {
             }
 
             let content = std::fs::read_to_string(&entry)?;
+            if is_generated_file(&content) {
+                continue;
+            }
             let lines: Vec<&str> = content.lines().collect();
+            let cfg_test_flags = cfg_test_line_flags(&lines);
+            let is_test_line = |line: usize| -> bool {
+                // `line` is 1-based.
+                cfg_test_flags
+                    .get(line.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(false)
+            };
+            let cleaned_lines = clean_source_lines(&content);
+            let impl_flags = impl_body_line_flags(&cleaned_lines);
+            let in_impl_body = |line: usize| -> bool {
+                // `line` is 1-based.
+                impl_flags
+                    .get(line.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(false)
+            };
             let module_prefix = path_to_module(&entry, dir);
 
             // Helper: check if a given line index has an entry-point attribute above it
@@ -461,6 +681,7 @@ impl DeclarationExtractor for RustExtractor {
                     language: Language::Rust,
                     is_entry_point: is_ep,
                     entry_point_reason: ep_reason,
+                    is_test: is_test_line(line),
                 });
             }
 
@@ -469,6 +690,11 @@ impl DeclarationExtractor for RustExtractor {
                 let name = cap[2].to_string();
                 let vis = parse_visibility(cap.get(1));
                 let line = line_number_of(cap.get(0).unwrap().start());
+                // `type X = …;` inside an impl block is an associated type,
+                // not a standalone declaration.
+                if in_impl_body(line) && lines[line - 1].trim_start().starts_with("type ") {
+                    continue;
+                }
                 let fqn = format!("{}::{}", module_prefix, name);
                 declarations.push(Declaration {
                     name: fqn,
@@ -479,6 +705,7 @@ impl DeclarationExtractor for RustExtractor {
                     language: Language::Rust,
                     is_entry_point: false,
                     entry_point_reason: None,
+                    is_test: is_test_line(line),
                 });
             }
 
@@ -497,15 +724,23 @@ impl DeclarationExtractor for RustExtractor {
                     language: Language::Rust,
                     is_entry_point: false,
                     entry_point_reason: None,
+                    is_test: is_test_line(line),
                 });
             }
 
             // Constants / statics
             for cap in const_re.captures_iter(&content) {
                 let name = cap[2].to_string();
+                // `const _: () = …` cannot be referenced by name; skip it.
+                if name == "_" {
+                    continue;
+                }
                 let vis = parse_visibility(cap.get(1));
                 let line = line_number_of(cap.get(0).unwrap().start());
                 let fqn = format!("{}::{}", module_prefix, name);
+                // Statics retained by the linker or runtime are alive
+                // without any code reference.
+                let (is_ep, ep_reason) = linker_retained_entry_point(&lines, line);
                 declarations.push(Declaration {
                     name: fqn,
                     kind: DeclarationKind::Constant,
@@ -513,8 +748,9 @@ impl DeclarationExtractor for RustExtractor {
                     file: rel.clone(),
                     line,
                     language: Language::Rust,
-                    is_entry_point: false,
-                    entry_point_reason: None,
+                    is_entry_point: is_ep,
+                    entry_point_reason: ep_reason,
+                    is_test: is_test_line(line),
                 });
             }
 
@@ -533,7 +769,29 @@ impl DeclarationExtractor for RustExtractor {
                     language: Language::Rust,
                     is_entry_point: false,
                     entry_point_reason: None,
+                    is_test: is_test_line(line),
                 });
+            }
+        }
+
+        // Propagate test status through out-of-line test modules:
+        // `#[cfg(test)] mod foo;` marks the module declaration, and every
+        // declaration whose fully-qualified name lives under that module is
+        // test code even though it sits in a separate file.
+        let test_mod_prefixes: Vec<String> = declarations
+            .iter()
+            .filter(|d| d.kind == DeclarationKind::Module && d.is_test)
+            .map(|d| format!("{}::", d.name))
+            .collect();
+        if !test_mod_prefixes.is_empty() {
+            for decl in &mut declarations {
+                if !decl.is_test
+                    && test_mod_prefixes
+                        .iter()
+                        .any(|p| decl.name.starts_with(p.as_str()))
+                {
+                    decl.is_test = true;
+                }
             }
         }
 
@@ -551,6 +809,25 @@ impl DeclarationExtractor for RustExtractor {
         let qualified_re = regex::Regex::new(r"(\w+)::(\w+)")?;
         let fn_call_re = regex::Regex::new(r"\b(\w+)\(")?;
         let method_call_re = regex::Regex::new(r"\.(\w+)\(")?;
+        // Bare SCREAMING_SNAKE_CASE identifiers — constants/statics used in
+        // plain expressions (`FOO.inc()`, `x = FOO + 1`, `&FOO`), which the
+        // qualified/call patterns above do not capture.
+        let bare_const_re = regex::Regex::new(r"\b([A-Z][A-Z0-9_]*[A-Z0-9])\b")?;
+        // Turbofish calls: `data_array::<16>(…)` — `foo::<` is a use of `foo`.
+        let turbofish_re = regex::Regex::new(r"\b(\w+)::<")?;
+        // Any path segment on the left of `::` references that module/type,
+        // including lowercase modules and the `mod::{…}` use form.
+        let path_left_re = regex::Regex::new(r"\b(\w+)::")?;
+        // String-path attributes: `#[serde(with = "bigint_serde")]`.
+        let attr_with_re = regex::Regex::new(r#"\bwith\s*=\s*"([\w:]+)""#)?;
+        let path_keywords: HashSet<&str> = ["crate", "self", "super", "std", "core", "alloc"]
+            .into_iter()
+            .collect();
+        // A line that *declares* a const/static must not count as a
+        // reference to the name it declares.
+        let const_decl_line_re = regex::Regex::new(
+            r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+(?:mut\s+)?([A-Za-z_]\w*)\s*:",
+        )?;
 
         // New type-level reference patterns
         // 1. Type annotations: `: TypeName`, `-> TypeName`, `: &TypeName`
@@ -570,6 +847,7 @@ impl DeclarationExtractor for RustExtractor {
                 .into_iter()
                 .collect();
 
+        let exclude_globs = compile_exclude_globs(&config.exclude_patterns)?;
         let mut references = Vec::new();
 
         for entry in walkdir_rs(dir) {
@@ -577,10 +855,14 @@ impl DeclarationExtractor for RustExtractor {
                 .strip_prefix(dir)
                 .unwrap_or(&entry)
                 .to_string_lossy()
-                .to_string();
+                .replace('\\', "/");
 
             // Skip target/ directory
-            if rel.starts_with("target/") || rel.starts_with("target\\") {
+            if rel.starts_with("target/") {
+                continue;
+            }
+
+            if path_is_excluded(&rel, &exclude_globs) {
                 continue;
             }
 
@@ -592,9 +874,19 @@ impl DeclarationExtractor for RustExtractor {
             }
 
             let content = std::fs::read_to_string(&entry)?;
+            if is_generated_file(&content) {
+                continue;
+            }
+            let cleaned_lines = clean_source_lines(&content);
 
             for (line_idx, line) in content.lines().enumerate() {
                 let line_num = line_idx + 1;
+                // Comment-and-string-stripped version of the line (format
+                // string interpolations are preserved as identifiers).
+                let cleaned = cleaned_lines
+                    .get(line_idx)
+                    .map(String::as_str)
+                    .unwrap_or("");
 
                 // Qualified path references: foo::bar
                 for cap in qualified_re.captures_iter(line) {
@@ -740,6 +1032,65 @@ impl DeclarationExtractor for RustExtractor {
                             });
                         }
                     }
+                }
+
+                // Turbofish calls: `foo::<T>(…)`.
+                for cap in turbofish_re.captures_iter(cleaned) {
+                    references.push(SymbolReference {
+                        from_file: rel.clone(),
+                        to_symbol: cap[1].to_string(),
+                        line: line_num,
+                    });
+                }
+
+                // Left-hand path segments: `commands::run()`, `use m::{a, b}`.
+                for cap in path_left_re.captures_iter(cleaned) {
+                    let name = &cap[1];
+                    if !path_keywords.contains(name) && !builtins.contains(name) {
+                        references.push(SymbolReference {
+                            from_file: rel.clone(),
+                            to_symbol: name.to_string(),
+                            line: line_num,
+                        });
+                    }
+                }
+
+                // String-path attributes: `#[serde(with = "bigint_serde")]`.
+                for cap in attr_with_re.captures_iter(line) {
+                    let path = &cap[1];
+                    references.push(SymbolReference {
+                        from_file: rel.clone(),
+                        to_symbol: path.to_string(),
+                        line: line_num,
+                    });
+                    if let Some(last) = path.rsplit("::").next() {
+                        if last != path {
+                            references.push(SymbolReference {
+                                from_file: rel.clone(),
+                                to_symbol: last.to_string(),
+                                line: line_num,
+                            });
+                        }
+                    }
+                }
+
+                // Bare constant/static identifiers in expressions.
+                // Scanned on the comment-and-string-stripped line so doc
+                // mentions and log strings do not count as uses, and the
+                // declaration line itself is not a self-reference.
+                let declared_here = const_decl_line_re
+                    .captures(cleaned)
+                    .map(|c| c[1].to_string());
+                for cap in bare_const_re.captures_iter(cleaned) {
+                    let name = &cap[1];
+                    if declared_here.as_deref() == Some(name) {
+                        continue;
+                    }
+                    references.push(SymbolReference {
+                        from_file: rel.clone(),
+                        to_symbol: name.to_string(),
+                        line: line_num,
+                    });
                 }
             }
         }
