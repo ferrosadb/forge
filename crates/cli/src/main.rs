@@ -792,6 +792,10 @@ enum DsmAction {
         /// Include test code in analysis
         #[arg(long)]
         include_tests: bool,
+        /// Exclude files matching these glob patterns (repeatable),
+        /// e.g. --exclude 'examples/**' --exclude 'bindings.rs'
+        #[arg(long)]
+        exclude: Vec<String>,
     },
     /// Generate architecture enforcement tests
     Enforce {
@@ -1277,12 +1281,13 @@ fn handle_dsm(action: DsmAction, pretty: bool) -> anyhow::Result<()> {
             min_confidence,
             format,
             include_tests,
+            exclude,
         } => {
             use forge_dsm_analyze::dead_code::{find_dead_code, Confidence};
             let config = ExtractConfig {
                 level: parse_level(&level),
                 prefix_filter: prefix,
-                exclude_patterns: vec![],
+                exclude_patterns: exclude,
                 detect_cross_language: false,
             };
 
@@ -2586,6 +2591,58 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 }
                 _ => Err(format!("Unknown dsm command: {cmd}. Use 'extract' or 'analyze'.")),
             }
+        }
+    );
+
+    // dead_code (frg dsm dead-code)
+    register_tool!(server, "dead_code",
+        "Find dead code (unreachable declarations) via BFS reachability from entry points (main functions, test functions, FFI/WASM exports, constructors). Use this to build a cleanup checklist of unused functions, types, constants, and modules. Findings carry a confidence level: 'definite' means a private symbol unreachable from any entry point; 'possible' means a public symbol with no internal references (it may still be used by external crates). The extractor is regex-based, so treat findings as candidates and verify before deleting — generated files and #[cfg(test)] items are automatically excluded. Returns a structured JSON report with totals and per-finding file/line/reason. Supports Rust, Elixir, Java, TypeScript, and C#.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "dir": {"type": "string", "description": "Project root directory to analyze (defaults to current working directory). Scans recursively."},
+                "min_confidence": {"type": "string", "enum": ["definite", "possible", "all"], "description": "Minimum confidence to include: 'definite' only shows private unreachable symbols, 'possible'/'all' also include public symbols with no internal references. Defaults to 'all'."},
+                "include_tests": {"type": "boolean", "description": "When true, include test code (test functions become entry points and test declarations are analyzed). Defaults to false."},
+                "prefix": {"type": "string", "description": "Only include elements whose module path starts with this prefix, e.g. 'crate::storage'"},
+                "exclude": {"type": "array", "items": {"type": "string"}, "description": "Glob patterns for files to exclude, e.g. ['examples/**', 'bindings.rs']"}
+            }
+        }),
+        |args| {
+            use forge_dsm_analyze::dead_code::{find_dead_code, Confidence};
+            use forge_dsm_analyze::extract::multi::MultiExtractor;
+            use forge_dsm_analyze::extract::{ExtractConfig, GranularityLevel};
+
+            let dir_str = args.get("dir").and_then(|v| v.as_str()).unwrap_or(".");
+            let dir = std::path::PathBuf::from(dir_str);
+            let min_confidence = args.get("min_confidence").and_then(|v| v.as_str()).unwrap_or("all");
+            let include_tests = args.get("include_tests").and_then(|v| v.as_bool()).unwrap_or(false);
+            let prefix = args.get("prefix").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let exclude: Vec<String> = args
+                .get("exclude")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let config = ExtractConfig {
+                level: GranularityLevel::Full,
+                prefix_filter: prefix,
+                exclude_patterns: exclude,
+                detect_cross_language: false,
+            };
+
+            let multi = MultiExtractor::new();
+            let (declarations, references) = multi
+                .extract_declarations(&dir, &config)
+                .map_err(|e| e.to_string())?;
+            let mut report = find_dead_code(&declarations, &references, include_tests);
+            if min_confidence == "definite" {
+                report.findings.retain(|f| f.confidence == Confidence::Definite);
+            }
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
         }
     );
 
