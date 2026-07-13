@@ -1,4 +1,5 @@
 /target
+/coverage
 
 # Forge runtime state (checklists/, etc.) when developing forge against itself
 /.forge/
