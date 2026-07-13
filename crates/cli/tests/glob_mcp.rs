@@ -6,18 +6,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn frg_bin() -> std::path::PathBuf {
-    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/
-    p.pop(); // forge/
-    p.push("target");
-    p.push("debug");
-    p.push("frg");
-    p
-}
-
 fn send_rpc(request: &str) -> String {
-    let mut child = Command::new(frg_bin())
+    let mut child = Command::new(env!("CARGO_BIN_EXE_frg"))
         .arg("--mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -83,14 +83,14 @@ jobs:
           --fail-under-functions 66
           --fail-under-regions 68
       - name: Publish coverage summary
-        if: always()
+        if: ${{ always() && hashFiles('coverage/summary.txt') != '' }}
         run: |
           echo '### Workspace coverage' >> "$GITHUB_STEP_SUMMARY"
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
           tail -n 2 coverage/summary.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage reports
-        if: always()
+        if: ${{ always() && hashFiles('coverage/summary.txt') != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-reports
