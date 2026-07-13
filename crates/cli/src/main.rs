@@ -5449,7 +5449,7 @@ fn main() -> anyhow::Result<()> {
                     eprintln!(
                         "[forge hook] skipping: received non-JSON on stdin ({e}); \
                          first bytes: {}",
-                        &stdin_data.chars().take(120).collect::<String>()
+                        stdin_data.chars().take(120).collect::<String>()
                     );
                     return Ok(());
                 }
