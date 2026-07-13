@@ -18,6 +18,8 @@ pub const DEFAULT_CQL_HOST: &str = "127.0.0.1:9042";
 #[derive(Debug, Default, Deserialize)]
 struct ForgeConfig {
     cql_host: Option<String>,
+    #[serde(default)]
+    debug_stop: Option<bool>,
 }
 
 /// Trim a candidate, dropping it if blank.
@@ -67,6 +69,69 @@ pub fn resolve_cql_host(explicit: Option<&str>) -> String {
     pick(explicit, env, file)
 }
 
+/// Split a (possibly comma-separated) contact-point string into individual
+/// `host:port` entries, dropping blanks. A single host yields a one-element vec.
+fn split_hosts(s: &str) -> Vec<String> {
+    s.split(',')
+        .filter_map(|h| non_blank(h.to_string()))
+        .collect()
+}
+
+/// Resolve the effective CQL contact points for the task store.
+///
+/// Any layer may supply a comma-separated list (e.g.
+/// `cql_host = "n1:19042,n2:19042,n3:19042"`). Passing every node lets the driver
+/// bootstrap from whichever is up and fail over for queries, so the board
+/// survives a single node loss instead of dying with one fixed contact point.
+/// Always returns at least one entry (the resolved value, or [`DEFAULT_CQL_HOST`]).
+pub fn resolve_cql_hosts(explicit: Option<&str>) -> Vec<String> {
+    let hosts = split_hosts(&resolve_cql_host(explicit));
+    if hosts.is_empty() {
+        vec![DEFAULT_CQL_HOST.to_string()]
+    } else {
+        hosts
+    }
+}
+
+/// Parse `debug_stop` from a `.forge/config.toml` body. Pure; testable.
+fn parse_debug_stop_toml(body: &str) -> Option<bool> {
+    toml::from_str::<ForgeConfig>(body)
+        .ok()
+        .and_then(|c| c.debug_stop)
+}
+
+/// Walk up from `start` for `.forge/config.toml`; return its `debug_stop`.
+fn read_config_debug_stop(start: &Path) -> Option<bool> {
+    for dir in start.ancestors() {
+        let candidate = dir.join(".forge").join("config.toml");
+        if let Ok(body) = std::fs::read_to_string(&candidate) {
+            return parse_debug_stop_toml(&body);
+        }
+    }
+    None
+}
+
+/// Resolve whether `debug_stop` board alerting is on. Precedence: explicit tool
+/// arg → `FORGE_DEBUG_STOP` (1/true/yes) → `.forge/config.toml` `debug_stop` →
+/// false. The explicit arg lets the LLM flip it on per call when it suspects the
+/// board is degraded.
+pub fn resolve_debug_stop(explicit: Option<bool>) -> bool {
+    if let Some(b) = explicit {
+        return b;
+    }
+    if let Ok(raw) = std::env::var("FORGE_DEBUG_STOP") {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {}
+        }
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| read_config_debug_stop(&cwd))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +166,37 @@ mod tests {
             "f:3"
         );
         assert_eq!(pick(Some("  "), Some("  ".into()), None), DEFAULT_CQL_HOST);
+    }
+
+    #[test]
+    fn split_hosts_single_and_list_and_blanks() {
+        assert_eq!(split_hosts("h:1"), vec!["h:1"]);
+        assert_eq!(
+            split_hosts("n1:19042, n2:19042 ,n3:19042"),
+            vec!["n1:19042", "n2:19042", "n3:19042"]
+        );
+        assert_eq!(split_hosts("a:1,,  ,b:2"), vec!["a:1", "b:2"]);
+        assert!(split_hosts("   ").is_empty());
+    }
+
+    #[test]
+    fn resolve_hosts_always_nonempty() {
+        // A single explicit host yields one contact point; the list form yields many.
+        assert_eq!(resolve_cql_hosts(Some("h:1")), vec!["h:1"]);
+        assert_eq!(
+            resolve_cql_hosts(Some("n1:19042,n2:19042,n3:19042")),
+            vec!["n1:19042", "n2:19042", "n3:19042"]
+        );
+    }
+
+    #[test]
+    fn parses_debug_stop_and_explicit_wins() {
+        assert_eq!(parse_debug_stop_toml("debug_stop = true\n"), Some(true));
+        assert_eq!(parse_debug_stop_toml("debug_stop = false\n"), Some(false));
+        assert_eq!(parse_debug_stop_toml("cql_host = \"h:1\"\n"), None);
+        // explicit arg short-circuits env/file
+        assert!(resolve_debug_stop(Some(true)));
+        assert!(!resolve_debug_stop(Some(false)));
     }
 
     #[test]

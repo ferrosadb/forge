@@ -5,6 +5,24 @@ All notable changes to forge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+- **Trusted web read/search tools.** Added `frg fetch-url` / MCP `fetch_url` for
+  read-only page extraction through Forge's own HTTP path (no persistence, no
+  third-party extraction provider, no auxiliary LLM), plus `frg web-search` /
+  MCP `web_search` backed only by an explicitly configured SearXNG endpoint
+  (`FORGE_WEB_SEARCH_URL` or `SEARXNG_URL`). The search tool fails loud when no
+  trusted backend is configured. SearXNG result metadata is scrubbed before
+  return and prompt-injection-shaped results are dropped; `summary` is a bounded
+  deterministic extractive field, not an LLM-generated summary.
+
+### Fixed
+- **`ingest-url` now fetches the sanitized URL after stripping secret query
+  parameters** instead of only sanitizing the stored provenance URL. Relative
+  same-domain links are resolved before crawl filtering so `--depth` can follow
+  `/docs/page` and `../page` links while preserving SSRF checks on every fetch.
+
 ## [0.13.5] - 2026-06-13
 
 Three small, independent cleanups (board tasks t_2c779031, t_29e8dc26, t_129ba347).

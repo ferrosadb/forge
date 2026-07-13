@@ -74,18 +74,23 @@ pub struct TaskStore {
 }
 
 impl TaskStore {
-    /// Connect to the CQL node, create schema, and return a `TaskStore`.
-    pub fn connect(cql_host: &str, tenant_id: Option<&str>) -> Result<Self> {
+    /// Connect to the CQL cluster, create schema, and return a `TaskStore`.
+    ///
+    /// `cql_hosts` are the bootstrap contact points: passing every node lets the
+    /// driver start from whichever is up and fail over for queries, so the board
+    /// survives a single node loss instead of dying with one fixed contact point.
+    pub fn connect(cql_hosts: &[String], tenant_id: Option<&str>) -> Result<Self> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("build tokio runtime")?;
 
-        let host = cql_host.to_string();
+        anyhow::ensure!(!cql_hosts.is_empty(), "no CQL contact points provided");
+        let hosts = cql_hosts.to_vec();
         let session: scylla::Session = rt
             .block_on(async {
                 scylla::SessionBuilder::new()
-                    .known_node(host.as_str())
+                    .known_nodes(&hosts)
                     .user("ferrosa_admin", "ferrosa_admin")
                     .build()
                     .await
@@ -100,6 +105,25 @@ impl TaskStore {
         };
         store.ensure_schema()?;
         Ok(store)
+    }
+
+    /// The driver's live view of the board cluster, derived from the topology it
+    /// discovered via `system.peers` (the advertised client addresses, so this is
+    /// NAT/Docker-correct): how many nodes are known and how many are up.
+    /// `Node::is_down()` is the driver's own liveness marker — the same topology
+    /// it routes queries over, so it can't disagree with reality.
+    pub fn board_health(&self) -> crate::debug_stop::BoardHealth {
+        let cluster = self.session.get_cluster_data();
+        let nodes = cluster.get_nodes_info();
+        let nodes_total = nodes.len();
+        let nodes_up = nodes
+            .iter()
+            .filter(|n| n.is_enabled() && !n.is_down())
+            .count();
+        crate::debug_stop::BoardHealth {
+            nodes_up,
+            nodes_total,
+        }
     }
 
     /// Create the three task tables if they don't exist (idempotent).

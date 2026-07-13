@@ -396,6 +396,21 @@ enum Commands {
         dry_run: bool,
     },
 
+    /// Fetch a web page as trusted read-only text (no persistence)
+    FetchUrl {
+        /// URL to fetch and extract
+        url: String,
+    },
+
+    /// Search via an explicitly configured trusted backend (SearXNG)
+    WebSearch {
+        /// Search query
+        query: String,
+        /// Maximum number of results to return
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
+
     /// Ingest an academic paper into a knowledge graph
     IngestPaper {
         /// URL, DOI (doi:10.xxx), arxiv ID, or local PDF path
@@ -1503,6 +1518,22 @@ fn record_mcp_analytics(tool_name: &str, raw_input_bytes: usize, output_json: &s
             );
         }
     }
+}
+
+/// Apply `debug_stop` board-health alerting to a task-tool result. When enabled
+/// (per-call `debug_stop` arg, else `FORGE_DEBUG_STOP`/`.forge/config.toml`),
+/// reads the driver's live board health and attaches a `debug_stop_alert`
+/// (degraded) or fails the call (critical) so the agent stops and investigates.
+fn finish_task<T: serde::Serialize>(
+    store: &forge_tasks::TaskStore,
+    args: &serde_json::Value,
+    value: &T,
+) -> Result<String, String> {
+    let on = forge_tasks::resolve_debug_stop(args.get("debug_stop").and_then(|v| v.as_bool()));
+    let v = serde_json::to_value(value).map_err(|e| e.to_string())?;
+    let out =
+        forge_tasks::apply_debug_stop(Ok(v), &store.board_health(), on).map_err(|(_, m)| m)?;
+    serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
 }
 
 /// Run forge as an MCP server over stdio, exposing all commands as tools.
@@ -2690,6 +2721,42 @@ fn run_mcp_server() -> anyhow::Result<()> {
         }
     );
 
+    // fetch_url — trusted read-only web extraction without KG persistence
+    register_tool!(server, "fetch_url",
+        "Fetch a web page through Forge's trusted HTTP path and return compact read-only text, sections, and links. Does not persist to ferrosa-memory, does not call third-party extraction providers, and does not invoke an auxiliary LLM.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch and extract"}
+            },
+            "required": ["url"]
+        }),
+        |args| {
+            let url = args.get("url").and_then(|v| v.as_str()).ok_or("url is required")?;
+            let result = forge_ingest::url::fetch_url(url).map_err(|e| e.to_string())?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+    );
+
+    // web_search — URL discovery through an explicitly configured trusted backend
+    register_tool!(server, "web_search",
+        "Search for URLs using a trusted user-configured SearXNG backend. Fails loud unless FORGE_WEB_SEARCH_URL or SEARXNG_URL is configured; Forge ships with no default third-party search provider.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "limit": {"type": "integer", "description": "Maximum number of results to return (default 5, max 50)"}
+            },
+            "required": ["query"]
+        }),
+        |args| {
+            let query = args.get("query").and_then(|v| v.as_str()).ok_or("query is required")?;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            let result = forge_ingest::url::trusted_web_search(query, limit).map_err(|e| e.to_string())?;
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+    );
+
     // ingest_paper — extract knowledge from academic papers (arxiv, IEEE, ACM, DOI, PDF)
     register_tool!(server, "ingest_paper",
         "Ingest an academic paper into a knowledge graph. Accepts arxiv URLs, DOIs (doi:10.xxx), Semantic Scholar links, IEEE/ACM URLs, bioRxiv, PubMed IDs, or local PDF paths. Extracts title, authors, abstract, references, key concepts, and document structure. Cleanses untrusted paper text against prompt injection before persistence. Uses fmem smart_ingest for entities, then inserts typed edges (wrote, references, discusses, affiliated_with, contains) after remapping entity ids chosen by fmem. Use `dry_run: true` for extraction-only.",
@@ -2750,14 +2817,15 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 "parents":        {"type": "array",   "items": {"type": "string"}, "description": "Parent task IDs to link to"},
                 "skills":         {"type": "array",   "items": {"type": "string"}, "description": "Related skill names"},
                 "created_by":     {"type": "string",  "description": "Creator identifier (default: agent)"},
-                "cql_host":       {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host":       {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop":     {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["title"]
         }),
         |args| {
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
-            let store = forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
+            let store = forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let req = forge_tasks::CreateTaskRequest {
                 title: args.get("title").and_then(|v| v.as_str()).ok_or("title is required")?.to_string(),
                 body: args.get("body").and_then(|v| v.as_str()).map(str::to_string),
@@ -2776,7 +2844,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 }),
             };
             let task = store.create_task(req).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&task).map_err(|e| e.to_string())
+            finish_task(&store, &args,&task)
         }
     );
 
@@ -2796,15 +2864,16 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 "block_reason": {"type": "string",  "description": "Block reason (use with status=blocked)"},
                 "result":       {"type": "string",  "description": "Result summary"},
                 "summary":      {"type": "string",  "description": "Task summary"},
-                "cql_host":     {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host":     {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop":   {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["task_id"]
         }),
         |args| {
             let task_id = args.get("task_id").and_then(|v| v.as_str()).ok_or("task_id is required")?;
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
-            let store = forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
+            let store = forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let patch = forge_tasks::UpdateTaskPatch {
                 status: args.get("status").and_then(|v| v.as_str()).map(str::to_string),
                 assignee: args.get("assignee").and_then(|v| v.as_str()).map(str::to_string),
@@ -2817,7 +2886,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 summary: args.get("summary").and_then(|v| v.as_str()).map(str::to_string),
             };
             let task = store.update_task(task_id, patch).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&task).map_err(|e| e.to_string())
+            finish_task(&store, &args,&task)
         }
     );
 
@@ -2830,7 +2899,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
             "type": "object",
             "properties": {
                 "task_id":  {"type": "string", "description": "Task ID (e.g. t_1a2b3c4d)"},
-                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["task_id"]
         }),
@@ -2839,12 +2909,12 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 .get("task_id")
                 .and_then(|v| v.as_str())
                 .ok_or("task_id is required")?;
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store =
-                forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+                forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let task = store.get_task(task_id).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&task).map_err(|e| e.to_string())
+            finish_task(&store, &args, &task)
         }
     );
 
@@ -2861,14 +2931,15 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 "priority_gte": {"type": "integer", "description": "Minimum priority (inclusive)"},
                 "priority_lte": {"type": "integer", "description": "Maximum priority (inclusive)"},
                 "limit":        {"type": "integer", "description": "Max results (default 50)"},
-                "cql_host":     {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host":     {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop":   {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             }
         }),
         |args| {
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store =
-                forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+                forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let filter = forge_tasks::TaskFilter {
                 status: args
                     .get("status")
@@ -2892,7 +2963,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
                     .map(|i| i as usize),
             };
             let tasks = store.list_tasks(filter).map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&tasks).map_err(|e| e.to_string())
+            finish_task(&store, &args, &tasks)
         }
     );
 
@@ -2906,7 +2977,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
             "properties": {
                 "parent_id": {"type": "string", "description": "Parent task ID"},
                 "child_id":  {"type": "string", "description": "Child task ID"},
-                "cql_host":  {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host":  {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["parent_id", "child_id"]
         }),
@@ -2919,16 +2991,17 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 .get("child_id")
                 .and_then(|v| v.as_str())
                 .ok_or("child_id is required")?;
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store =
-                forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+                forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             store
                 .link_tasks(parent_id, child_id, "child")
                 .map_err(|e| e.to_string())?;
-            Ok(
-                serde_json::json!({"ok": true, "parent_id": parent_id, "child_id": child_id})
-                    .to_string(),
+            finish_task(
+                &store,
+                &args,
+                &serde_json::json!({"ok": true, "parent_id": parent_id, "child_id": child_id}),
             )
         }
     );
@@ -2943,7 +3016,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
             "properties": {
                 "parent_id": {"type": "string", "description": "Parent task ID"},
                 "child_id":  {"type": "string", "description": "Child task ID"},
-                "cql_host":  {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host":  {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["parent_id", "child_id"]
         }),
@@ -2956,16 +3030,17 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 .get("child_id")
                 .and_then(|v| v.as_str())
                 .ok_or("child_id is required")?;
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store =
-                forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+                forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             store
                 .unlink_tasks(parent_id, child_id)
                 .map_err(|e| e.to_string())?;
-            Ok(
-                serde_json::json!({"ok": true, "parent_id": parent_id, "child_id": child_id})
-                    .to_string(),
+            finish_task(
+                &store,
+                &args,
+                &serde_json::json!({"ok": true, "parent_id": parent_id, "child_id": child_id}),
             )
         }
     );
@@ -2981,7 +3056,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 "task_id":  {"type": "string", "description": "Task ID"},
                 "author":   {"type": "string", "description": "Comment author (default: agent)"},
                 "body":     {"type": "string", "description": "Comment text"},
-                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
             "required": ["task_id", "body"]
         }),
@@ -2998,14 +3074,14 @@ fn run_mcp_server() -> anyhow::Result<()> {
                 .get("author")
                 .and_then(|v| v.as_str())
                 .unwrap_or("agent");
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store =
-                forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+                forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let comment = store
                 .add_comment(task_id, author, body)
                 .map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&comment).map_err(|e| e.to_string())
+            finish_task(&store, &args, &comment)
         }
     );
 
@@ -3015,15 +3091,16 @@ fn run_mcp_server() -> anyhow::Result<()> {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"}
+                "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             }
         }),
         |args| {
-            let cql_host =
-                forge_tasks::resolve_cql_host(args.get("cql_host").and_then(|v| v.as_str()));
-            let store = forge_tasks::TaskStore::connect(&cql_host, None).map_err(|e| e.to_string())?;
+            let cql_hosts =
+                forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
+            let store = forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let board = store.board().map_err(|e| e.to_string())?;
-            serde_json::to_string_pretty(&board).map_err(|e| e.to_string())
+            finish_task(&store, &args,&board)
         }
     );
 
@@ -5031,6 +5108,14 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", forge_shared::emit_json(&load_report, cli.pretty)?);
             }
         }
+        Commands::FetchUrl { url } => {
+            let result = forge_ingest::url::fetch_url(&url)?;
+            println!("{}", forge_shared::emit_json(&result, cli.pretty)?);
+        }
+        Commands::WebSearch { query, limit } => {
+            let result = forge_ingest::url::trusted_web_search(&query, limit)?;
+            println!("{}", forge_shared::emit_json(&result, cli.pretty)?);
+        }
         Commands::IngestPaper {
             input,
             mcp_bin,
@@ -5618,7 +5703,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let req = forge_tasks::CreateTaskRequest {
@@ -5651,7 +5736,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let patch = forge_tasks::UpdateTaskPatch {
@@ -5671,7 +5756,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
 
         TaskAction::Get { task_id, cql_host } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let task = store.get_task(&task_id)?;
@@ -5687,7 +5772,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let filter = forge_tasks::TaskFilter {
@@ -5707,7 +5792,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             store.link_tasks(&parent_id, &child_id, "child")?;
@@ -5720,7 +5805,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             store.unlink_tasks(&parent_id, &child_id)?;
@@ -5734,7 +5819,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             cql_host,
         } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let comment = store.add_comment(&task_id, &author, &body)?;
@@ -5743,7 +5828,7 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
 
         TaskAction::Board { cql_host } => {
             let store = forge_tasks::TaskStore::connect(
-                &forge_tasks::resolve_cql_host(cql_host.as_deref()),
+                &forge_tasks::resolve_cql_hosts(cql_host.as_deref()),
                 None,
             )?;
             let board = store.board()?;

@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release, for example v0.13.5'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag || '' }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: frg-linux-x86_64
+            binary: frg
+            archive: tar.gz
+          - os: macos-14
+            artifact: frg-macos-aarch64
+            binary: frg
+            archive: tar.gz
+          - os: windows-latest
+            artifact: frg-windows-x86_64
+            binary: frg.exe
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-04-25
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Build release binary
+        run: cargo build --release --bin frg
+      - name: Smoke test binary
+        shell: bash
+        run: |
+          ./target/release/${{ matrix.binary }} --version
+          ./target/release/${{ matrix.binary }} --help >/dev/null
+      - name: Package Unix archive
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p package
+          cp target/release/${{ matrix.binary }} package/frg
+          cp README.md LICENSE package/
+          tar -C package -czf ${{ matrix.artifact }}.tar.gz .
+      - name: Package Windows archive
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item target/release/${{ matrix.binary }} package/frg.exe
+          Copy-Item README.md package/README.md
+          Copy-Item LICENSE package/LICENSE
+          Compress-Archive -Path package/* -DestinationPath ${{ matrix.artifact }}.zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum -- ./* > SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release view "$TAG_NAME" >/dev/null 2>&1 && {
+            echo "Release $TAG_NAME already exists; refusing to mutate immutable release artifacts" >&2
+            exit 1
+          }
+          gh release create "$TAG_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$TAG_NAME" \
+            --generate-notes
