@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Architecture, decision, and compiled-plan specifications for the remaining
   Ferrosa event storage, independent loop judge, enforcement-hook, and
   end-to-end integration packets.
+- CI coverage reporting with LCOV, JSON, and HTML artifacts, plus non-regression
+  floors of 70% lines, 66% functions, and 68% regions across the workspace.
 
 ## [0.13.5] - 2026-06-13
 
