@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same-domain links are resolved before crawl filtering so `--depth` can follow
   `/docs/page` and `../page` links while preserving SSRF checks on every fetch.
 
+## [0.14.0] - 2026-07-12
+
+### Added
+- Schema-v3 checklist state with typed waiting gates, bounded attempt
+  fingerprints, distinct implementer/verifier roles, atomic review follow-ups,
+  audited human priority preferences, and deterministic scored-ready ordering.
+- CLI and MCP operations for starting and finishing attempts, waiting for typed
+  gates, recording reviews, resolving gates, scoring work, and retrieving
+  recovery context without replaying raw command output.
+- Architecture, decision, and compiled-plan specifications for the remaining
+  Ferrosa event storage, independent loop judge, enforcement-hook, and
+  end-to-end integration packets.
+
 ## [0.13.5] - 2026-06-13
 
 Three small, independent cleanups (board tasks t_2c779031, t_29e8dc26, t_129ba347).
