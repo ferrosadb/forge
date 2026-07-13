@@ -10,8 +10,13 @@ Architecture and implementation specs for the Forge Rust CLI workspace.
 
 ## Feature Specs
 
+- [anti-loop-attempt-control.md](anti-loop-attempt-control.md) — bounded attempt control, waiting gates, scoring, and loop detection
 - [token-conservation.md](token-conservation.md) — progressive disclosure and MCP tool tiering
 - [paper-ingestion.md](paper-ingestion.md) — academic paper ingestion design
+
+## Architecture Decisions
+
+- [ADR-001: Operational attempt state and memory ownership](decisions/001-operational-attempt-state-and-memory.md) — separates checklist state, Ferrosa memory, raw output, and outage fallback
 
 ## Work Item Pipeline
 
