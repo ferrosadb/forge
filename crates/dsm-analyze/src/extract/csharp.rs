@@ -89,6 +89,7 @@ impl DeclarationExtractor for CSharpExtractor {
                         language: Language::CSharp,
                         is_entry_point: has_entry_point && line_num < 5,
                         entry_point_reason: None,
+                        is_test: false,
                     });
                 }
 
@@ -126,6 +127,7 @@ impl DeclarationExtractor for CSharpExtractor {
                         } else {
                             None
                         },
+                        is_test: false,
                     });
                 }
             }

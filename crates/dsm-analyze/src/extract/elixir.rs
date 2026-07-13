@@ -686,6 +686,7 @@ fn extract_elixir_declarations(content: &str, file: &str, declarations: &mut Vec
             language: Language::Elixir,
             is_entry_point: false,
             entry_point_reason: None,
+            is_test: false,
         });
     }
 
@@ -734,6 +735,7 @@ fn extract_elixir_declarations(content: &str, file: &str, declarations: &mut Vec
             language: Language::Elixir,
             is_entry_point: is_ep,
             entry_point_reason: ep_reason,
+            is_test: false,
         });
     }
 
@@ -765,6 +767,7 @@ fn extract_elixir_declarations(content: &str, file: &str, declarations: &mut Vec
             language: Language::Elixir,
             is_entry_point: false,
             entry_point_reason: None,
+            is_test: false,
         });
     }
 
@@ -784,6 +787,7 @@ fn extract_elixir_declarations(content: &str, file: &str, declarations: &mut Vec
                 language: Language::Elixir,
                 is_entry_point: false,
                 entry_point_reason: None,
+                is_test: false,
             });
         }
     }
@@ -840,6 +844,7 @@ fn extract_elixir_declarations(content: &str, file: &str, declarations: &mut Vec
             language: Language::Elixir,
             is_entry_point: false,
             entry_point_reason: None,
+            is_test: false,
         });
     }
 
@@ -864,6 +869,7 @@ fn extract_elixir_declarations(content: &str, file: &str, declarations: &mut Vec
             language: Language::Elixir,
             is_entry_point: true,
             entry_point_reason: Some("test block".to_string()),
+            is_test: false,
         });
     }
 }
@@ -1003,6 +1009,7 @@ fn extract_erlang_declarations(content: &str, file: &str, declarations: &mut Vec
                 language: Language::Erlang,
                 is_entry_point: false,
                 entry_point_reason: None,
+                is_test: false,
             });
         }
     }
@@ -1069,6 +1076,7 @@ fn extract_erlang_declarations(content: &str, file: &str, declarations: &mut Vec
             language: Language::Erlang,
             is_entry_point: is_ep,
             entry_point_reason: ep_reason,
+            is_test: false,
         });
     }
 
@@ -1093,6 +1101,7 @@ fn extract_erlang_declarations(content: &str, file: &str, declarations: &mut Vec
             language: Language::Erlang,
             is_entry_point: false,
             entry_point_reason: None,
+            is_test: false,
         });
     }
 
@@ -1117,6 +1126,7 @@ fn extract_erlang_declarations(content: &str, file: &str, declarations: &mut Vec
             language: Language::Erlang,
             is_entry_point: false,
             entry_point_reason: None,
+            is_test: false,
         });
     }
 
@@ -1141,6 +1151,7 @@ fn extract_erlang_declarations(content: &str, file: &str, declarations: &mut Vec
             language: Language::Erlang,
             is_entry_point: false,
             entry_point_reason: None,
+            is_test: false,
         });
     }
 
@@ -1165,6 +1176,7 @@ fn extract_erlang_declarations(content: &str, file: &str, declarations: &mut Vec
             language: Language::Erlang,
             is_entry_point: false,
             entry_point_reason: None,
+            is_test: false,
         });
     }
 }

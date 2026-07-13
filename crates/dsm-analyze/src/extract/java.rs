@@ -482,6 +482,7 @@ impl DeclarationExtractor for JavaExtractor {
                     language: Language::Java,
                     is_entry_point: false,
                     entry_point_reason: None,
+                    is_test: false,
                 });
             }
 
@@ -504,6 +505,7 @@ impl DeclarationExtractor for JavaExtractor {
                     language: Language::Java,
                     is_entry_point: false,
                     entry_point_reason: None,
+                    is_test: false,
                 });
             }
 
@@ -526,6 +528,7 @@ impl DeclarationExtractor for JavaExtractor {
                     language: Language::Java,
                     is_entry_point: false,
                     entry_point_reason: None,
+                    is_test: false,
                 });
             }
 
@@ -548,6 +551,7 @@ impl DeclarationExtractor for JavaExtractor {
                     language: Language::Java,
                     is_entry_point: false,
                     entry_point_reason: None,
+                    is_test: false,
                 });
             }
 
@@ -620,6 +624,7 @@ impl DeclarationExtractor for JavaExtractor {
                     language: Language::Java,
                     is_entry_point: is_ep,
                     entry_point_reason: ep_reason,
+                    is_test: false,
                 });
             }
         }

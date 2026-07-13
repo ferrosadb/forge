@@ -80,6 +80,7 @@ All commands write JSON to stdout unless noted. Pass output through `frg hook` i
 | Command | Description |
 |---------|-------------|
 | `frg dsm extract\|analyze [dir]` | Design Structure Matrix: `extract` returns raw dependency edges; `analyze` runs the full pipeline with cycle detection, cluster identification, metrics, and refactoring suggestions |
+| `frg dsm dead-code [dir]` | Find unreachable declarations via BFS from entry points; `--min-confidence definite\|possible\|all`, `--include-tests`, `--exclude <glob>` (repeatable), skips generated files and `#[cfg(test)]` items |
 | `frg dep-tree [dir]` | Build per-module dependency map showing import fan-in and fan-out |
 | `frg api-diff` | Diff public API surface between two refs; detect breaking changes |
 | `frg schema-diff` | Diff SQL/CQL/Cypher schemas between two files or refs for breaking migration detection |
@@ -198,6 +199,7 @@ The MCP server (activated by `frg run`) exposes the same functionality directly 
 | `concurrency_scan` | `frg concurrency-scan` |
 | `materialization_scan` | `frg materialization-scan` |
 | `dsm` | `frg dsm` |
+| `dead_code` | `frg dsm dead-code` |
 | `merge_check` | `frg merge-check` |
 | `schema_diff` | `frg schema-diff` |
 | `api_contract_diff` | `frg api-diff` |
