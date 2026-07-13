@@ -1,4 +1,7 @@
 //! `forge` — Token-saving CLI for Claude Code skill workflows.
+//! Correctness: Correct when CLI/MCP contracts preserve structured inputs, legacy modes, and Forge-gated tests.
+//! Last revised: 2026-07-12
+//! Last changed: Wired anti-loop checklist attempts, gates, reviews, resolution, and scored scheduling.
 //!
 //! Single binary with subcommands for summarizing test output, distilling logs,
 //! filtering diffs, deduplicating lint output, monitoring logs, validating
@@ -666,6 +669,67 @@ enum ChecklistAction {
         /// Include expired in-progress leases as ready to reclaim
         #[arg(long)]
         include_expired_leases: bool,
+        /// Order dependency-ready pending items by effective score
+        #[arg(long, requires = "policy_file")]
+        scored: bool,
+        /// JSON file containing the complete ScorePolicy used by --scored
+        #[arg(long)]
+        policy_file: Option<PathBuf>,
+    },
+    /// Start a bounded checklist-item attempt
+    AttemptStart {
+        name: String,
+        item_id: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        role: String,
+        /// JSON file containing the complete AttemptFingerprintInput
+        #[arg(long = "file")]
+        fingerprint_file: PathBuf,
+    },
+    /// Finish the active bounded checklist-item attempt
+    AttemptFinish {
+        name: String,
+        item_id: String,
+        attempt_id: String,
+        /// JSON file containing the complete AttemptFinish record
+        #[arg(long = "file")]
+        finish_file: PathBuf,
+    },
+    /// Put an item behind a typed waiting gate
+    Wait {
+        name: String,
+        item_id: String,
+        /// JSON file containing the complete WaitingGate
+        #[arg(long = "file")]
+        gate_file: PathBuf,
+    },
+    /// Atomically apply a structured review and its follow-ups
+    Review {
+        name: String,
+        item_id: String,
+        /// JSON file containing the complete ReviewInput
+        #[arg(long = "file")]
+        review_file: PathBuf,
+    },
+    /// Resolve a non-review waiting gate back to pending
+    Resolve {
+        name: String,
+        item_id: String,
+        /// Nonempty human identity
+        #[arg(long = "by")]
+        resolved_by: String,
+        /// Nonempty human resolution reason
+        #[arg(long)]
+        reason: String,
+    },
+    /// Explain effective scores for incomplete checklist items
+    Score {
+        name: String,
+        /// JSON file containing the complete ScorePolicy
+        #[arg(long = "file")]
+        policy_file: PathBuf,
     },
     /// Claim ready items for an agent with a lease
     Claim {
@@ -717,6 +781,81 @@ enum ChecklistAction {
         /// Checklist name
         name: String,
     },
+}
+
+#[cfg(test)]
+mod checklist_cli_surface_tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    // T-005 surface test list:
+    // - [x] expose attempt start/finish, wait, review, resolve, score, and scored ready
+    // - [x] accept structured JSON files for fingerprints, finishes, gates, reviews, and policy
+    // - [x] preserve the legacy checklist commands and help
+    #[test]
+    fn checklist_exposes_anti_loop_surface() {
+        let command = Cli::command();
+        let checklist = command
+            .get_subcommands()
+            .find(|command| command.get_name() == "checklist")
+            .expect("checklist command");
+        let modes = checklist
+            .get_subcommands()
+            .map(|command| command.get_name())
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "attempt-start",
+            "attempt-finish",
+            "wait",
+            "review",
+            "resolve",
+            "score",
+        ] {
+            assert!(modes.contains(&expected), "missing checklist {expected}");
+        }
+        for legacy in [
+            "create",
+            "create-dag",
+            "list",
+            "show",
+            "validate",
+            "ready",
+            "claim",
+            "set",
+            "note",
+            "release",
+            "delete",
+        ] {
+            assert!(modes.contains(&legacy), "missing legacy checklist {legacy}");
+        }
+
+        let ready = checklist
+            .get_subcommands()
+            .find(|command| command.get_name() == "ready")
+            .expect("ready command");
+        assert!(ready.get_arguments().any(|arg| arg.get_id() == "scored"));
+
+        for (mode, file_arg) in [
+            ("attempt-start", "fingerprint_file"),
+            ("attempt-finish", "finish_file"),
+            ("wait", "gate_file"),
+            ("review", "review_file"),
+            ("score", "policy_file"),
+        ] {
+            let subcommand = checklist
+                .get_subcommands()
+                .find(|command| command.get_name() == mode)
+                .unwrap_or_else(|| panic!("missing checklist {mode}"));
+            assert!(
+                subcommand
+                    .get_arguments()
+                    .any(|arg| arg.get_id() == file_arg),
+                "missing --{} on checklist {mode}",
+                file_arg.replace('_', "-")
+            );
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -3098,107 +3237,12 @@ fn run_mcp_server() -> anyhow::Result<()> {
         }
     );
 
-    // checklist_state — persistent workflow checklist store for multi-session skills
-    register_tool!(server, "checklist_state",
-        "Persistent workflow checklist store. Use to save and resume multi-step workflow state across sessions (blueprint phases, compile-project task packets, performance-tuning methodology). Modes: create, create_dag, list, show, validate, ready, claim, set, note, release, delete. State is stored as JSON files under .forge/checklists/ in the project root. Call with mode=list to discover existing checklists.",
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "mode": {"type": "string", "enum": ["create", "create_dag", "list", "show", "validate", "ready", "claim", "set", "note", "release", "delete"], "description": "Operation to perform"},
-                "name": {"type": "string", "description": "Checklist name (required for all modes except 'list')"},
-                "titles": {"type": "array", "items": {"type": "string"}, "description": "Item titles for 'create'"},
-                "items": {"type": "array", "description": "Rich checklist items for 'create_dag'"},
-                "item_id": {"type": "string", "description": "Target item id for 'set', 'note', and 'release'"},
-                "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "blocked"], "description": "New status for 'set'"},
-                "text": {"type": "string", "description": "Note text for 'note'"},
-                "agent_id": {"type": "string", "description": "Agent identifier for 'claim' and optional owner check for 'release'"},
-                "limit": {"type": "integer", "description": "Maximum ready/claim items"},
-                "lease_minutes": {"type": "integer", "description": "Claim lease duration in minutes (default: 60)"},
-                "include_expired_leases": {"type": "boolean", "description": "Treat expired in-progress leases as ready/reclaimable"}
-            },
-            "required": ["mode"]
-        }),
-        |args| {
-            let dir = std::env::current_dir().map_err(|e| e.to_string())?;
-            let mode = args.get("mode").and_then(|v| v.as_str()).ok_or("mode is required")?;
-            let name = || args.get("name").and_then(|v| v.as_str()).ok_or("name is required".to_string());
-            match mode {
-                "create" => {
-                    let n = name()?;
-                    let titles: Vec<String> = args.get("titles")
-                        .and_then(|v| v.as_array())
-                        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
-                        .unwrap_or_default();
-                    let cl = forge_checklist_state::create(&dir, n, &titles).map_err(|e| e.to_string())?;
-                    serde_json::to_string_pretty(&cl).map_err(|e| e.to_string())
-                }
-                "create_dag" => {
-                    let n = name()?;
-                    let items_value = args.get("items").cloned().ok_or("items is required")?;
-                    let items: Vec<forge_checklist_state::ChecklistItem> = serde_json::from_value(items_value).map_err(|e| e.to_string())?;
-                    let cl = forge_checklist_state::create_dag_from_items(&dir, n, items).map_err(|e| e.to_string())?;
-                    serde_json::to_string_pretty(&cl).map_err(|e| e.to_string())
-                }
-                "list" => {
-                    let names = forge_checklist_state::list(&dir).map_err(|e| e.to_string())?;
-                    serde_json::to_string_pretty(&names).map_err(|e| e.to_string())
-                }
-                "show" => {
-                    let n = name()?;
-                    let cl = forge_checklist_state::show(&dir, n).map_err(|e| e.to_string())?;
-                    serde_json::to_string_pretty(&cl).map_err(|e| e.to_string())
-                }
-                "validate" => {
-                    let n = name()?;
-                    let report = forge_checklist_state::validate(&dir, n).map_err(|e| e.to_string())?;
-                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
-                }
-                "ready" => {
-                    let n = name()?;
-                    let limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-                    let include_expired = args.get("include_expired_leases").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let report = forge_checklist_state::ready(&dir, n, limit, include_expired).map_err(|e| e.to_string())?;
-                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
-                }
-                "claim" => {
-                    let n = name()?;
-                    let agent_id = args.get("agent_id").and_then(|v| v.as_str()).ok_or("agent_id is required")?;
-                    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-                    let lease_minutes = args.get("lease_minutes").and_then(|v| v.as_i64()).unwrap_or(60);
-                    let include_expired = args.get("include_expired_leases").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let report = forge_checklist_state::claim(&dir, n, agent_id, limit, lease_minutes, include_expired).map_err(|e| e.to_string())?;
-                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
-                }
-                "set" => {
-                    let n = name()?;
-                    let item_id = args.get("item_id").and_then(|v| v.as_str()).ok_or("item_id is required")?;
-                    let status = args.get("status").and_then(|v| v.as_str()).ok_or("status is required")?;
-                    let st = forge_checklist_state::ItemStatus::parse(status).map_err(|e| e.to_string())?;
-                    let cl = forge_checklist_state::set(&dir, n, item_id, st).map_err(|e| e.to_string())?;
-                    serde_json::to_string_pretty(&cl).map_err(|e| e.to_string())
-                }
-                "note" => {
-                    let n = name()?;
-                    let item_id = args.get("item_id").and_then(|v| v.as_str()).ok_or("item_id is required")?;
-                    let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    let cl = forge_checklist_state::note(&dir, n, item_id, text).map_err(|e| e.to_string())?;
-                    serde_json::to_string_pretty(&cl).map_err(|e| e.to_string())
-                }
-                "release" => {
-                    let n = name()?;
-                    let item_id = args.get("item_id").and_then(|v| v.as_str()).ok_or("item_id is required")?;
-                    let agent_id = args.get("agent_id").and_then(|v| v.as_str());
-                    let cl = forge_checklist_state::release(&dir, n, item_id, agent_id).map_err(|e| e.to_string())?;
-                    serde_json::to_string_pretty(&cl).map_err(|e| e.to_string())
-                }
-                "delete" => {
-                    let n = name()?;
-                    forge_checklist_state::delete(&dir, n).map_err(|e| e.to_string())?;
-                    Ok(format!("{{\"deleted\":\"{n}\"}}"))
-                }
-                _ => Err(format!("unknown mode: {mode}")),
-            }
-        }
+    // checklist_state — schema and handlers live together in the MCP crate so
+    // the CLI server cannot drift from the independently tested MCP contract.
+    let checklist_root = std::env::current_dir()?;
+    server.register_tool(
+        forge_mcp_server::checklist_tool_definition(),
+        forge_mcp_server::checklist_tool_handler(checklist_root),
     );
 
     // todo_extract — inventory TODO/FIXME/HACK comments with git blame
@@ -4028,6 +4072,15 @@ fn context_check_print(mcp_bin: Option<std::path::PathBuf>) {
             parts.join(", ")
         );
     }
+}
+
+fn read_structured_json<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+) -> anyhow::Result<T> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|error| anyhow::anyhow!("invalid JSON in {}: {error}", path.display()))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -5146,9 +5199,106 @@ fn main() -> anyhow::Result<()> {
                     name,
                     limit,
                     include_expired_leases,
+                    scored,
+                    policy_file,
                 } => {
-                    let report =
-                        forge_checklist_state::ready(&dir, &name, limit, include_expired_leases)?;
+                    if scored {
+                        let policy: forge_checklist_state::ScorePolicy = read_structured_json(
+                            policy_file
+                                .as_deref()
+                                .ok_or_else(|| anyhow::anyhow!("--policy-file is required"))?,
+                        )?;
+                        let report =
+                            forge_checklist_state::scored_ready(&dir, &name, &policy, limit)?;
+                        println!("{}", forge_shared::emit_json(&report, cli.pretty)?);
+                    } else {
+                        if policy_file.is_some() {
+                            anyhow::bail!("--policy-file requires --scored");
+                        }
+                        let report = forge_checklist_state::ready(
+                            &dir,
+                            &name,
+                            limit,
+                            include_expired_leases,
+                        )?;
+                        println!("{}", forge_shared::emit_json(&report, cli.pretty)?);
+                    }
+                }
+                ChecklistAction::AttemptStart {
+                    name,
+                    item_id,
+                    agent,
+                    role,
+                    fingerprint_file,
+                } => {
+                    let role = match role.as_str() {
+                        "implementer" => forge_checklist_state::AttemptRole::Implementer,
+                        "verifier" => forge_checklist_state::AttemptRole::Verifier,
+                        _ => anyhow::bail!("role must be 'implementer' or 'verifier'"),
+                    };
+                    let fingerprint = read_structured_json(&fingerprint_file)?;
+                    let report = forge_checklist_state::attempt_start(
+                        &dir,
+                        &name,
+                        &item_id,
+                        &agent,
+                        role,
+                        fingerprint,
+                    )?;
+                    println!("{}", forge_shared::emit_json(&report, cli.pretty)?);
+                }
+                ChecklistAction::AttemptFinish {
+                    name,
+                    item_id,
+                    attempt_id,
+                    finish_file,
+                } => {
+                    let finish = read_structured_json(&finish_file)?;
+                    let state = forge_checklist_state::attempt_finish(
+                        &dir,
+                        &name,
+                        &item_id,
+                        &attempt_id,
+                        finish,
+                    )?;
+                    println!("{}", forge_shared::emit_json(&state, cli.pretty)?);
+                }
+                ChecklistAction::Wait {
+                    name,
+                    item_id,
+                    gate_file,
+                } => {
+                    let gate = read_structured_json(&gate_file)?;
+                    let state = forge_checklist_state::set_waiting(&dir, &name, &item_id, gate)?;
+                    println!("{}", forge_shared::emit_json(&state, cli.pretty)?);
+                }
+                ChecklistAction::Review {
+                    name,
+                    item_id,
+                    review_file,
+                } => {
+                    let review = read_structured_json(&review_file)?;
+                    let state = forge_checklist_state::apply_review(&dir, &name, &item_id, review)?;
+                    println!("{}", forge_shared::emit_json(&state, cli.pretty)?);
+                }
+                ChecklistAction::Resolve {
+                    name,
+                    item_id,
+                    resolved_by,
+                    reason,
+                } => {
+                    let report = forge_checklist_state::resolve_waiting(
+                        &dir,
+                        &name,
+                        &item_id,
+                        &resolved_by,
+                        &reason,
+                    )?;
+                    println!("{}", forge_shared::emit_json(&report, cli.pretty)?);
+                }
+                ChecklistAction::Score { name, policy_file } => {
+                    let policy = read_structured_json(&policy_file)?;
+                    let report = forge_checklist_state::score(&dir, &name, &policy)?;
                     println!("{}", forge_shared::emit_json(&report, cli.pretty)?);
                 }
                 ChecklistAction::Claim {

@@ -8,3 +8,7 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+forge-checklist-state = { path = "../checklist-state" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

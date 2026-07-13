@@ -1,5 +1,11 @@
+//! Module: Serve Forge tools over MCP and adapt structured checklist operations.
+//! Correctness: Correct when tool schemas match handlers and checklist records remain structured end to end.
+//! Last revised: 2026-07-12
+//! Last changed: Added the shared T-005 checklist schema, handler, and recovery context.
+
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,6 +38,360 @@ pub struct ToolDef {
     /// Optional annotations for tool behavior
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<ToolAnnotations>,
+}
+
+/// Define the checklist MCP contract in the transport crate so the CLI server
+/// and contract tests share one schema. Structured anti-loop records remain
+/// JSON objects all the way into `forge-checklist-state`.
+pub fn checklist_tool_definition() -> ToolDef {
+    ToolDef {
+        name: "checklist_state".to_owned(),
+        description: "Persistent workflow checklist state, including bounded attempts, typed waiting gates, atomic reviews, and explainable scoring. Legacy modes remain supported.".to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "description": "Operation to perform",
+                    "enum": [
+                        "create", "create_dag", "list", "show", "validate", "ready",
+                        "claim", "set", "note", "release", "delete", "attempt_start",
+                        "attempt-start", "attempt_finish", "attempt-finish", "wait", "review",
+                        "resolve", "score"
+                    ]
+                },
+                "name": {"type": "string", "description": "Checklist name (required except for list)"},
+                "titles": {"type": "array", "items": {"type": "string"}, "description": "Item titles for create"},
+                "items": {"type": "array", "description": "Structured ChecklistItem records for create_dag"},
+                "item_id": {"type": "string", "description": "Target checklist item ID"},
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "in_progress", "completed", "blocked"],
+                    "description": "New status for legacy set; use wait with a typed gate for waiting"
+                },
+                "text": {"type": "string", "description": "Note text for note"},
+                "agent_id": {"type": "string", "description": "Agent identity for claim, release, or attempt_start"},
+                "role": {"type": "string", "enum": ["implementer", "verifier"], "description": "Attempt role"},
+                "attempt_id": {"type": "string", "description": "Active attempt ID for attempt_finish"},
+                "fingerprint": {"type": "object", "description": "Complete AttemptFingerprintInput record"},
+                "finish": {"type": "object", "description": "Complete AttemptFinish record"},
+                "gate": {"type": "object", "description": "Complete WaitingGate record"},
+                "review": {"type": "object", "description": "Complete ReviewInput record"},
+                "resolved_by": {"type": "string", "description": "Nonempty human identity for resolve"},
+                "reason": {"type": "string", "description": "Nonempty human reason for resolve"},
+                "score_policy": {"type": "object", "description": "Complete ScorePolicy record"},
+                "scored": {"type": "boolean", "description": "Return only scored dependency-ready pending items"},
+                "limit": {"type": "integer", "description": "Maximum ready or claim items"},
+                "lease_minutes": {"type": "integer", "description": "Claim lease duration in minutes (default 60)"},
+                "include_expired_leases": {"type": "boolean", "description": "Treat expired in-progress leases as ready or reclaimable"}
+            },
+            "required": ["mode"]
+        }),
+        tier: 1,
+        annotations: None,
+    }
+}
+
+/// Build the checklist handler for a fixed project root. Keeping path and JSON
+/// adaptation here lets the CLI registration remain declarative and prevents
+/// policy logic from accumulating in the command dispatcher.
+pub fn checklist_tool_handler(project_root: PathBuf) -> ToolHandler {
+    Arc::new(move |args| handle_checklist_tool(&project_root, args))
+}
+
+fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{key} is required"))
+}
+
+fn required_record<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, String> {
+    let value = args
+        .get(key)
+        .cloned()
+        .ok_or_else(|| format!("{key} is required"))?;
+    serde_json::from_value(value).map_err(|error| format!("invalid {key}: {error}"))
+}
+
+fn checklist_item_context(
+    state: forge_checklist_state::Checklist,
+    item_id: &str,
+    recovery_hints: Vec<String>,
+    extra: Value,
+) -> Result<String, String> {
+    let item = state
+        .items
+        .iter()
+        .find(|item| item.id == item_id)
+        .cloned()
+        .ok_or_else(|| format!("item id '{item_id}' missing from returned state"))?;
+    let mut prior_attempt_ids = item
+        .attempt_state
+        .as_ref()
+        .map(|attempt_state| {
+            attempt_state
+                .exact_attempts
+                .iter()
+                .map(|attempt| attempt.attempt_id.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let current_attempt_id = extra
+        .get("attempt")
+        .and_then(|attempt| attempt.get("attemptId"))
+        .and_then(Value::as_str);
+    if let Some(gate) = &item.gate {
+        for attempt_id in &gate.attempt_ids {
+            if current_attempt_id != Some(attempt_id.as_str())
+                && !prior_attempt_ids.contains(attempt_id)
+            {
+                prior_attempt_ids.push(attempt_id.clone());
+            }
+        }
+    }
+    let event_refs = item
+        .attempt_state
+        .as_ref()
+        .map(|attempt_state| attempt_state.last_event_refs.clone())
+        .unwrap_or_default();
+    let mut response = json!({
+        "state": state,
+        "item": item,
+        "priorAttemptIds": prior_attempt_ids,
+        "recoveryHints": recovery_hints,
+        "eventRefs": event_refs
+    });
+    let response_object = response
+        .as_object_mut()
+        .ok_or_else(|| "internal checklist response was not an object".to_string())?;
+    let extra_object = extra
+        .as_object()
+        .ok_or_else(|| "internal checklist response extension was not an object".to_string())?;
+    response_object.extend(extra_object.clone());
+    serde_json::to_string_pretty(&response).map_err(|error| error.to_string())
+}
+
+fn handle_checklist_tool(project_root: &Path, args: Value) -> Result<String, String> {
+    let mode = required_string(&args, "mode")?;
+    let name = || required_string(&args, "name");
+    let item_id = || required_string(&args, "item_id");
+    match mode {
+        "create" => {
+            let titles = args
+                .get("titles")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let state = forge_checklist_state::create(project_root, name()?, &titles)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&state).map_err(|error| error.to_string())
+        }
+        "create_dag" => {
+            let items: Vec<forge_checklist_state::ChecklistItem> = required_record(&args, "items")?;
+            let state = forge_checklist_state::create_dag_from_items(project_root, name()?, items)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&state).map_err(|error| error.to_string())
+        }
+        "list" => {
+            let names =
+                forge_checklist_state::list(project_root).map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&names).map_err(|error| error.to_string())
+        }
+        "show" => {
+            let state = forge_checklist_state::show(project_root, name()?)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&state).map_err(|error| error.to_string())
+        }
+        "validate" => {
+            let report = forge_checklist_state::validate(project_root, name()?)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&report).map_err(|error| error.to_string())
+        }
+        "ready" if args.get("scored").and_then(Value::as_bool).unwrap_or(false) => {
+            let policy: forge_checklist_state::ScorePolicy =
+                required_record(&args, "score_policy")?;
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize);
+            let report = forge_checklist_state::scored_ready(project_root, name()?, &policy, limit)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&report).map_err(|error| error.to_string())
+        }
+        "ready" => {
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize);
+            let include_expired = args
+                .get("include_expired_leases")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let report =
+                forge_checklist_state::ready(project_root, name()?, limit, include_expired)
+                    .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&report).map_err(|error| error.to_string())
+        }
+        "claim" => {
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(1) as usize;
+            let lease_minutes = args
+                .get("lease_minutes")
+                .and_then(Value::as_i64)
+                .unwrap_or(60);
+            let include_expired = args
+                .get("include_expired_leases")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let report = forge_checklist_state::claim(
+                project_root,
+                name()?,
+                required_string(&args, "agent_id")?,
+                limit,
+                lease_minutes,
+                include_expired,
+            )
+            .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&report).map_err(|error| error.to_string())
+        }
+        "set" => {
+            let status =
+                forge_checklist_state::ItemStatus::parse(required_string(&args, "status")?)
+                    .map_err(|error| error.to_string())?;
+            let state = forge_checklist_state::set(project_root, name()?, item_id()?, status)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&state).map_err(|error| error.to_string())
+        }
+        "note" => {
+            let state = forge_checklist_state::note(
+                project_root,
+                name()?,
+                item_id()?,
+                args.get("text").and_then(Value::as_str).unwrap_or(""),
+            )
+            .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&state).map_err(|error| error.to_string())
+        }
+        "release" => {
+            let state = forge_checklist_state::release(
+                project_root,
+                name()?,
+                item_id()?,
+                args.get("agent_id").and_then(Value::as_str),
+            )
+            .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&state).map_err(|error| error.to_string())
+        }
+        "delete" => {
+            let checklist_name = name()?;
+            forge_checklist_state::delete(project_root, checklist_name)
+                .map_err(|error| error.to_string())?;
+            Ok(json!({"deleted": checklist_name}).to_string())
+        }
+        "attempt_start" | "attempt-start" => {
+            let checklist_name = name()?;
+            let target = item_id()?;
+            let role: forge_checklist_state::AttemptRole =
+                serde_json::from_value(json!(required_string(&args, "role")?))
+                    .map_err(|error| format!("invalid role: {error}"))?;
+            let fingerprint = required_record(&args, "fingerprint")?;
+            let attempt = forge_checklist_state::attempt_start(
+                project_root,
+                checklist_name,
+                target,
+                required_string(&args, "agent_id")?,
+                role,
+                fingerprint,
+            )
+            .map_err(|error| error.to_string())?;
+            let state = forge_checklist_state::show(project_root, checklist_name)
+                .map_err(|error| error.to_string())?;
+            let recovery_hints = match attempt.decision {
+                forge_checklist_state::AttemptDecision::Accepted => {
+                    vec![format!(
+                        "finish attempt {} with a structured finish record",
+                        attempt.attempt_id
+                    )]
+                }
+                forge_checklist_state::AttemptDecision::LoopDetected => vec![
+                    "resolve the loop gate with a structurally novel action or human decision"
+                        .to_string(),
+                ],
+            };
+            checklist_item_context(state, target, recovery_hints, json!({"attempt": attempt}))
+        }
+        "attempt_finish" | "attempt-finish" => {
+            let checklist_name = name()?;
+            let target = item_id()?;
+            let finish = required_record(&args, "finish")?;
+            let state = forge_checklist_state::attempt_finish(
+                project_root,
+                checklist_name,
+                target,
+                required_string(&args, "attempt_id")?,
+                finish,
+            )
+            .map_err(|error| error.to_string())?;
+            checklist_item_context(
+                state,
+                target,
+                vec![
+                    "follow the structured next action or move the item to a typed gate"
+                        .to_string(),
+                ],
+                json!({}),
+            )
+        }
+        "wait" => {
+            let target = item_id()?;
+            let gate = required_record(&args, "gate")?;
+            let state = forge_checklist_state::set_waiting(project_root, name()?, target, gate)
+                .map_err(|error| error.to_string())?;
+            checklist_item_context(
+                state,
+                target,
+                vec![
+                    "satisfy the typed gate, then use review or resolve as appropriate".to_string(),
+                ],
+                json!({}),
+            )
+        }
+        "review" => {
+            let target = item_id()?;
+            let review = required_record(&args, "review")?;
+            let state = forge_checklist_state::apply_review(project_root, name()?, target, review)
+                .map_err(|error| error.to_string())?;
+            checklist_item_context(
+                state,
+                target,
+                vec!["continue with any required review follow-ups".to_string()],
+                json!({}),
+            )
+        }
+        "resolve" => {
+            let report = forge_checklist_state::resolve_waiting(
+                project_root,
+                name()?,
+                item_id()?,
+                required_string(&args, "resolved_by")?,
+                required_string(&args, "reason")?,
+            )
+            .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&report).map_err(|error| error.to_string())
+        }
+        "score" => {
+            let policy = required_record(&args, "score_policy")?;
+            let report = forge_checklist_state::score(project_root, name()?, &policy)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(&report).map_err(|error| error.to_string())
+        }
+        _ => Err(format!("unknown mode: {mode}")),
+    }
 }
 
 /// Annotations for MCP tools
@@ -505,6 +865,26 @@ mod tests {
         );
     }
 
+    fn score_policy() -> Value {
+        json!({
+            "defaultBasePriority": 0,
+            "easeBonus": {"small": 0, "medium": 0, "large": 0, "unspecified": 0},
+            "dagUnlock": {
+                "priorityDivisor": 10,
+                "effortWeight": {"small": 0, "medium": 0, "large": 0, "unspecified": 0}
+            },
+            "goalProgressMaxBonus": 0,
+            "exactRetryPenaltyPerUnit": 4,
+            "semanticFixationPenaltyPerUnit": 6,
+            "parentGoalRetryPenaltyPerUnit": 8,
+            "minimumFixatedItemsForGoalPenalty": 2,
+            "minimumPostPivotReturnsForGoalPenalty": 2,
+            "decay": {"intervalSeconds": 3600, "recoveryPerInterval": 2},
+            "unblock": {"penalizedItem": 9, "penalizedGoal": 11},
+            "criticalVisibilityFloor": 25
+        })
+    }
+
     // -----------------------------------------------------------------------
 
     #[test]
@@ -663,5 +1043,206 @@ mod tests {
         let resp = server.respond_tools_call(json!(10), &params);
         assert_eq!(resp["result"]["isError"], false);
         assert_eq!(resp["result"]["content"][0]["text"], "null args ok");
+    }
+
+    #[test]
+    fn checklist_surface_exposes_structured_anti_loop_modes() {
+        let def = checklist_tool_definition();
+        let properties = &def.input_schema["properties"];
+        let modes = properties["mode"]["enum"].as_array().expect("mode enum");
+
+        for mode in [
+            "attempt_start",
+            "attempt_finish",
+            "wait",
+            "review",
+            "resolve",
+            "score",
+            "ready",
+        ] {
+            assert!(modes.iter().any(|value| value == mode), "missing {mode}");
+        }
+        for structured in ["fingerprint", "finish", "gate", "review", "score_policy"] {
+            assert!(
+                properties.get(structured).is_some(),
+                "missing structured {structured} argument"
+            );
+        }
+        assert_eq!(properties["scored"]["type"], "boolean");
+    }
+
+    #[test]
+    fn checklist_attempt_modes_return_structured_recovery_context() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let handler = checklist_tool_handler(temp.path().to_path_buf());
+        handler(json!({
+            "mode": "create",
+            "name": "attempts",
+            "titles": ["Implement T-005"]
+        }))
+        .unwrap();
+        handler(json!({
+            "mode": "claim",
+            "name": "attempts",
+            "agent_id": "agent-a"
+        }))
+        .unwrap();
+
+        let started: Value = serde_json::from_str(
+            &handler(json!({
+                "mode": "attempt_start",
+                "name": "attempts",
+                "item_id": "implement-t-005",
+                "agent_id": "agent-a",
+                "role": "implementer",
+                "fingerprint": {
+                    "acceptanceCriterion": "CLI and MCP parity",
+                    "relevantInputs": [{"path": "crates/cli/src/main.rs", "digest": "sha256:abc"}],
+                    "normalizedCommand": "cargo test -p forge checklist"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(started["attempt"]["attemptId"], "A-1");
+        assert_eq!(started["item"]["status"], "in_progress");
+        assert_eq!(started["priorAttemptIds"], json!([]));
+        assert_eq!(started["eventRefs"], json!([]));
+        assert!(!started["recoveryHints"].as_array().unwrap().is_empty());
+
+        let finished: Value = serde_json::from_str(
+            &handler(json!({
+                "mode": "attempt_finish",
+                "name": "attempts",
+                "item_id": "implement-t-005",
+                "attempt_id": "A-1",
+                "finish": {
+                    "resultSignature": "tests passed",
+                    "progress": "wired CLI",
+                    "newInformation": "surface is stable",
+                    "nextAction": "verify MCP"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            finished["item"]["attemptState"]["lastAttempt"]["attemptId"],
+            "A-1"
+        );
+        assert_eq!(finished["priorAttemptIds"], json!(["A-1"]));
+        assert!(!finished["recoveryHints"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn checklist_wait_review_resolve_and_scored_ready_remain_structured() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let handler = checklist_tool_handler(temp.path().to_path_buf());
+        handler(json!({
+            "mode": "create_dag",
+            "name": "workflow",
+            "items": [
+                {"id": "reviewed", "title": "Review me", "basePriority": 100},
+                {"id": "b-tie", "title": "Tie B", "basePriority": 30},
+                {"id": "a-tie", "title": "Tie A", "basePriority": 30},
+                {"id": "low", "title": "Low", "basePriority": 10},
+                {"id": "dependent", "title": "Dependent", "depends_on": ["reviewed"], "basePriority": 90}
+            ]
+        }))
+        .unwrap();
+
+        let waiting: Value = serde_json::from_str(
+            &handler(json!({
+                "mode": "wait",
+                "name": "workflow",
+                "item_id": "reviewed",
+                "gate": {
+                    "kind": "review",
+                    "createdAt": "2026-07-12T18:00:00Z",
+                    "reason": "Needs human review",
+                    "attemptIds": ["A-7"]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(waiting["item"]["gate"]["attemptIds"], json!(["A-7"]));
+        assert_eq!(waiting["priorAttemptIds"], json!(["A-7"]));
+
+        let reviewed: Value = serde_json::from_str(
+            &handler(json!({
+                "mode": "review",
+                "name": "workflow",
+                "item_id": "reviewed",
+                "review": {
+                    "reviewId": "R-1",
+                    "outcome": "approved",
+                    "reviewerId": "human:bkearns",
+                    "reviewedAt": "2026-07-12T18:05:00Z",
+                    "reason": "Approved",
+                    "feedback": [],
+                    "followUps": []
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reviewed["item"]["status"], "completed");
+
+        handler(json!({
+            "mode": "wait",
+            "name": "workflow",
+            "item_id": "low",
+            "gate": {
+                "kind": "decision",
+                "createdAt": "2026-07-12T18:06:00Z",
+                "reason": "Choose a pivot",
+                "attemptIds": ["A-8"]
+            }
+        }))
+        .unwrap();
+        assert!(handler(json!({
+            "mode": "resolve",
+            "name": "workflow",
+            "item_id": "low",
+            "resolved_by": "",
+            "reason": "pivot"
+        }))
+        .is_err());
+        let resolved: Value = serde_json::from_str(
+            &handler(json!({
+                "mode": "resolve",
+                "name": "workflow",
+                "item_id": "low",
+                "resolved_by": "human:bkearns",
+                "reason": "Use the new evidence path"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resolved["state"]["items"][3]["status"], "pending");
+        assert_eq!(resolved["priorAttemptIds"], json!(["A-8"]));
+
+        let scored: Value = serde_json::from_str(
+            &handler(json!({
+                "mode": "ready",
+                "name": "workflow",
+                "scored": true,
+                "score_policy": score_policy()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            scored["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["item"]["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["dependent", "a-tie", "b-tie", "low"]
+        );
+        assert!(scored["items"][0]["score"]["components"]["basePriority"].is_number());
+        assert!(scored["items"][0]["score"]["explanation"].is_string());
     }
 }

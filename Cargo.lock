@@ -640,6 +640,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -864,8 +865,10 @@ name = "forge-mcp-server"
 version = "0.13.5"
 dependencies = [
  "anyhow",
+ "forge-checklist-state",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
