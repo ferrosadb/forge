@@ -7,5 +7,6 @@
 //! engine (header mapping, board planning, push planning).
 
 pub mod config;
+pub mod mapping;
 pub mod model;
 pub mod normalize;

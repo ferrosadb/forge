@@ -70,6 +70,18 @@ pub struct CanonicalRow {
     pub sheet_row_index: usize,
 }
 
+/// The raw, unmapped contents of a Google Sheet tab as fetched from the
+/// Sheets API: a header row plus zero or more data rows. Sheet rows may be
+/// *ragged* — the Sheets API omits trailing empty cells, so a data row can
+/// be shorter than `headers` — callers must treat any missing cell index as
+/// an empty string rather than indexing out of bounds (see
+/// [`crate::mapping::map_grid`]).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Grid {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
