@@ -94,9 +94,17 @@ Two layers, following forge's per-crate `.forge/config.toml` precedence
 1. **`.forge/config.toml`** — Google OAuth client (see Auth) and defaults.
 2. **Per-sheet mapping** — `.forge/sheets/<alias>.toml`:
 ```toml
+# NOTE: TOML top-level keys (including these arrays) MUST precede any [table];
+# a bare `writable = […]` after [columns] would nest as `columns.writable`.
 spreadsheet_id = "EXAMPLE_SPREADSHEET_ID"
 tab            = "QA Log"
 id_column      = "QA Log ID"
+
+writable = ["status", "fix_ver", "resolution_notes"]
+# Which sheet-side states are ours to advance (handoff); everything else is client-owned.
+dev_writable_status = ["In Progress", "In Review", "Fixed - Needs Verification"]
+# Terminal on the sheet: skip on import, and never push status onto these.
+terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
 
 [columns]                       # sheet header -> canonical field
 "QA Log ID"          = "id"
@@ -115,8 +123,6 @@ id_column      = "QA Log ID"
 "Build/Version Fixed (git commit for demo, version tag for prod)" = "fix_ver"
 "Resolution Notes"   = "resolution_notes"
 
-writable = ["status", "fix_ver", "resolution_notes"]
-
 # Status lifecycle → forge TaskStatus (many-to-one on pull)
 [status_map]
 "New"                       = "triage"
@@ -128,11 +134,6 @@ writable = ["status", "fix_ver", "resolution_notes"]
 "Won't Fix"                 = "archived"
 "Duplicate"                 = "archived"
 "Deferred"                  = "blocked"
-
-# Which sheet-side states are ours to advance (handoff); everything else is client-owned.
-dev_writable_status = ["In Progress", "In Review", "Fixed - Needs Verification"]
-# Terminal on the sheet: skip on import, and never push status onto these.
-terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
 ```
 
 ## Auth
