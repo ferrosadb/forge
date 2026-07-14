@@ -10,6 +10,7 @@
 //! that orchestration testable without network or CQL.
 
 pub mod board;
+pub mod board_exec;
 pub mod board_plan;
 pub mod config;
 pub mod mapping;
