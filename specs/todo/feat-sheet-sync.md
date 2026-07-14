@@ -235,8 +235,9 @@ Pure-engine unit tests against `FakeSheets` (no network):
 2. CLI + MCP wiring in `crates/cli`.
 3. `0.15.0` bump + CHANGELOG.
 4. `.forge/sheets/spoton-qa.toml` mapping (first consumer; committed as example).
-5. **Claude skill** driving the loop (pull → work → push) for Google Sheets —
-   location TBD at review (user skills tree vs. repo `.claude/skills`).
+5. **Claude skill** driving the loop (pull → work → push) for Google Sheets,
+   shipped **in the forge repo** (e.g. `skills/sheet-sync/`) so it installs with
+   forge.
 6. This spec advanced todo → verified; PR to `ferrosadb/forge`.
 
 ## Open questions
@@ -244,7 +245,6 @@ Pure-engine unit tests against `FakeSheets` (no network):
 - **OQ-1 (deferred):** auto-cut a prod version tag during push for
   prod-environment fixes and record it as `fix_ver` (interpretation #2 of "tag a
   release"). Out of v1; revisit after the manual loop is proven.
-- **OQ-2:** skill install location — `~/src/research/skills` vs repo
-  `.claude/skills`. Decide at spec review.
+- **OQ-2 (resolved):** skill ships in the forge repo (`skills/sheet-sync/`).
 - **OQ-3:** the sheet's two `QA-005` rows and the parenthetical-in-ID-cell need a
   human cleanup pass regardless of code.
