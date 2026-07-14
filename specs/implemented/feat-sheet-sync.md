@@ -1,6 +1,6 @@
 # feat: sheet-sync — Google Sheets ↔ task board sync
 
-**Status:** todo → (in-process → implemented → verified)
+**Status:** implemented (pending verification) — see this branch `feat/gsheet-task-sync`
 **Crate:** `crates/sheet-sync` (`forge-sheet-sync`)
 **Surface:** `frg sheet {pull,push,auth}` + MCP tools `sheet_pull`, `sheet_push`, `sheet_auth`
 **Target version:** forge `0.15.0` (minor — additive feature)
