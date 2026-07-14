@@ -16,13 +16,15 @@
 //! (there's nothing to conflict with yet).
 //!
 //! On update, the picture is different: once a developer has picked the
-//! task up on the board (`InProgress`, `Blocked`, or `Complete` — the
-//! "dev-owned" statuses), the sheet must never be allowed to shove the task
-//! back to an earlier stage (e.g. a stale `New` row re-synced after the dev
-//! already moved the task to `InProgress`). So [`plan_pull`] only sets
+//! task up on the board (`InProgress`, `Blocked`, or `Complete`), or once
+//! the task has been closed out (`Archived`) — the "protected" statuses —
+//! the sheet must never be allowed to shove the task back to an earlier
+//! stage (e.g. a stale `New` row re-synced after the dev already moved the
+//! task to `InProgress`, or a stale row re-synced after the task was
+//! archived, which must never un-archive it). So [`plan_pull`] only sets
 //! `UpdateTaskPatch::status` when the task's *current* board status (as
 //! reported by the injected `existing_status` closure) is **not**
-//! dev-owned; otherwise it leaves `status: None`, meaning "don't touch it".
+//! protected; otherwise it leaves `status: None`, meaning "don't touch it".
 
 use crate::config::SheetMapping;
 use crate::model::{CanonicalField, CanonicalRow};
@@ -48,13 +50,17 @@ pub enum BoardOp {
     Skip { row_id: String, reason: String },
 }
 
-/// The board statuses a developer (not the sheet) owns once reached. Once a
-/// task is in one of these, pull planning never overwrites its status — see
-/// the module doc's "never-move-backward" rule.
-const DEV_OWNED_STATUSES: [TaskStatus; 3] = [
+/// The board statuses a pull must never move a task away from: the
+/// developer-owned in-flight statuses (`InProgress`, `Blocked`, `Complete`)
+/// plus `Archived`, the terminal closed state. A task in any of these
+/// states must never have its status changed by a pull — in particular, a
+/// pull must never un-archive a closed task. See the module doc's
+/// "never-move-backward" rule.
+const PROTECTED_STATUSES: [TaskStatus; 4] = [
     TaskStatus::InProgress,
     TaskStatus::Blocked,
     TaskStatus::Complete,
+    TaskStatus::Archived,
 ];
 
 /// Plans the pull-side board operation for every row in `rows`, in order.
@@ -101,9 +107,9 @@ fn plan_row(
         };
     }
 
-    let dev_owned =
-        existing_status(&entry.task_id).is_some_and(|status| DEV_OWNED_STATUSES.contains(&status));
-    let status = if dev_owned {
+    let protected =
+        existing_status(&entry.task_id).is_some_and(|status| PROTECTED_STATUSES.contains(&status));
+    let status = if protected {
         None
     } else {
         Some(target_status(row, mapping).as_str().to_string())
@@ -166,15 +172,19 @@ pub fn target_status(row: &CanonicalRow, mapping: &SheetMapping) -> TaskStatus {
 /// Implementation: inline FNV-1a (64-bit) over the concatenation of
 /// `field_name=value\n` for every present field, visited in
 /// [`CanonicalField`]'s `Ord` (the fields are already stored in a
-/// `BTreeMap`, so iteration is sorted and thus stable). No new crate
-/// dependency, no clock/random input — same row always hashes the same.
+/// `BTreeMap`, so iteration is sorted and thus stable). `field_name` is
+/// [`CanonicalField::as_canonical_str`] — a stable, explicit identifier —
+/// rather than the `derive(Debug)` variant name, because this hash is
+/// persisted to `.forge/sheets/<alias>.state.toml` and must not shift if
+/// `Debug`'s output format ever changes. No new crate dependency, no
+/// clock/random input — same row always hashes the same.
 pub fn content_hash(row: &CanonicalRow) -> String {
     const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
 
     let mut hash = FNV_OFFSET_BASIS;
     for (field, value) in &row.fields {
-        let line = format!("{field:?}={value}\n");
+        let line = format!("{}={value}\n", field.as_canonical_str());
         for byte in line.as_bytes() {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(FNV_PRIME);
@@ -517,6 +527,50 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
                 assert_eq!(
                     patch.title,
                     Some("[QA-016] Login button unresponsive".to_string())
+                );
+            }
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn changed_row_with_archived_status_never_moves_status_backward() {
+        let mapping = qa_mapping();
+        let mut row = qa_016();
+        let mut state = State::default();
+        // Stored hash reflects the *old* content, before the edit below.
+        state.upsert(
+            "QA-016".to_string(),
+            StateEntry {
+                task_id: "t_existing03".to_string(),
+                content_hash: content_hash(&row),
+                last_push_status: None,
+            },
+        );
+        // Sheet-side edit: the row's content now differs from stored hash.
+        row.fields.insert(
+            CanonicalField::Description,
+            "Updated description".to_string(),
+        );
+
+        let existing_status = |task_id: &str| -> Option<TaskStatus> {
+            assert_eq!(task_id, "t_existing03");
+            Some(TaskStatus::Archived)
+        };
+
+        let ops = plan_pull(&[row], &mapping, &state, &existing_status);
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            BoardOp::Update {
+                row_id,
+                task_id,
+                patch,
+            } => {
+                assert_eq!(row_id, "QA-016");
+                assert_eq!(task_id, "t_existing03");
+                assert_eq!(
+                    patch.status, None,
+                    "a pull must never un-archive a closed task"
                 );
             }
             other => panic!("expected Update, got {other:?}"),

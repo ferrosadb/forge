@@ -57,6 +57,33 @@ impl CanonicalField {
             _ => None,
         }
     }
+
+    /// The stable, explicit field identifier for this variant — the exact
+    /// same token [`Self::parse`] accepts for it. Used by
+    /// [`crate::board_plan::content_hash`], which is persisted to
+    /// `.forge/sheets/<alias>.state.toml`: hashing this instead of the
+    /// `derive(Debug)` variant name keeps the persisted hash stable across
+    /// `Debug`-format changes. Exhaustive match (no wildcard) so a new
+    /// variant fails to compile here rather than silently falling through.
+    pub fn as_canonical_str(&self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::Title => "title",
+            Self::Type => "type",
+            Self::Category => "category",
+            Self::Description => "description",
+            Self::Steps => "steps",
+            Self::Expected => "expected",
+            Self::Actual => "actual",
+            Self::Environment => "environment",
+            Self::Severity => "severity",
+            Self::Priority => "priority",
+            Self::MvpBlocker => "mvp_blocker",
+            Self::Status => "status",
+            Self::FixVer => "fix_ver",
+            Self::ResolutionNotes => "resolution_notes",
+        }
+    }
 }
 
 /// A single sheet row after header resolution: its normalized id (see
@@ -116,5 +143,33 @@ mod tests {
     #[test]
     fn rejects_unknown_field_names() {
         assert_eq!(CanonicalField::parse("not_a_field"), None);
+    }
+
+    #[test]
+    fn as_canonical_str_round_trips_through_parse_for_every_variant() {
+        let variants = [
+            CanonicalField::Id,
+            CanonicalField::Title,
+            CanonicalField::Type,
+            CanonicalField::Category,
+            CanonicalField::Description,
+            CanonicalField::Steps,
+            CanonicalField::Expected,
+            CanonicalField::Actual,
+            CanonicalField::Environment,
+            CanonicalField::Severity,
+            CanonicalField::Priority,
+            CanonicalField::MvpBlocker,
+            CanonicalField::Status,
+            CanonicalField::FixVer,
+            CanonicalField::ResolutionNotes,
+        ];
+        for field in variants {
+            assert_eq!(
+                CanonicalField::parse(field.as_canonical_str()),
+                Some(field),
+                "as_canonical_str/parse drifted for {field:?}"
+            );
+        }
     }
 }
