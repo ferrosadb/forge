@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 /// Env var naming a Google OAuth `client_secret.json` path directly. Takes
 /// precedence over `.forge/config.toml`.
-const CLIENT_SECRET_ENV: &str = "FORGE_GOOGLE_OAUTH_CLIENT";
+pub(crate) const CLIENT_SECRET_ENV: &str = "FORGE_GOOGLE_OAUTH_CLIENT";
 
 /// The Sheets API scope this crate requests (read + write cell values).
 const SHEETS_SCOPE: &str = "https://www.googleapis.com/auth/spreadsheets";
@@ -307,7 +307,7 @@ pub fn parse_redirect_query(request_line: &str) -> anyhow::Result<HashMap<String
 /// claimed security boundary on its own (defense in depth alongside never
 /// interpolating a token directly), but it's this module's only
 /// diagnostic surface that touches raw HTTP response bodies.
-fn redact_token_fields(s: &str) -> String {
+pub(crate) fn redact_token_fields(s: &str) -> String {
     let mut out = s.to_string();
     for key in ["access_token", "refresh_token", "id_token"] {
         let needle = format!("\"{key}\":\"");

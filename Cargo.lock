@@ -957,9 +957,11 @@ name = "forge-sheet-sync"
 version = "0.15.0"
 dependencies = [
  "anyhow",
+ "base64",
  "dirs",
  "forge-tasks",
  "getrandom 0.2.17",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

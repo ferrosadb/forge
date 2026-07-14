@@ -3302,9 +3302,11 @@ fn run_mcp_server() -> anyhow::Result<()> {
     );
 
     // sheet_auth — run the interactive Google OAuth consent flow for a
-    // sheet-sync alias and cache its refresh token.
+    // sheet-sync alias and cache its refresh token. No-op when a service
+    // account is configured (FORGE_GOOGLE_SERVICE_ACCOUNT / .forge/config.toml
+    // [google] service_account_path) — that flow is already headless.
     register_tool!(server, "sheet_auth",
-        "Run the interactive Google OAuth consent flow for a sheet-sync alias (matching `.forge/sheets/<alias>.toml`) and cache its refresh token, so later sheet_pull/sheet_push calls don't need to re-consent. Opens a local browser-based loopback flow — run this once per alias in an environment where a browser can complete the Google consent screen. Returns {\"authorized\":true,\"alias\":<alias>} on success.",
+        "Authorize a sheet-sync alias (matching `.forge/sheets/<alias>.toml`) for later sheet_pull/sheet_push calls. If a Google service account is configured (FORGE_GOOGLE_SERVICE_ACCOUNT env or `[google] service_account_path` in .forge/config.toml), this is a no-op headless check — no browser involved. Otherwise it runs the interactive Google OAuth consent flow (a local browser-based loopback flow) and caches the resulting refresh token, so later calls don't need to re-consent. Returns {\"authorized\":true,\"method\":<\"service_account\"|\"oauth\">,\"alias\":<alias>} on success.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3317,9 +3319,8 @@ fn run_mcp_server() -> anyhow::Result<()> {
             // Resolve the alias FIRST so a bad alias fails loud before the
             // interactive OAuth consent flow ever starts.
             forge_sheet_sync::resolve_alias(alias).map_err(|e| e.to_string())?;
-            let client = forge_sheet_sync::oauth::OAuthClient::load().map_err(|e| e.to_string())?;
-            forge_sheet_sync::oauth::authorize(alias, &client).map_err(|e| e.to_string())?;
-            let out = serde_json::json!({ "authorized": true, "alias": alias });
+            let outcome = forge_sheet_sync::credentials::authorize(alias).map_err(|e| e.to_string())?;
+            let out = serde_json::json!({ "authorized": outcome.authorized, "method": outcome.method, "alias": alias });
             serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
         }
     );
@@ -3344,9 +3345,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
             // OAuth/CQL/network call.
             let (mapping, state_path) =
                 forge_sheet_sync::resolve_alias(alias).map_err(|e| e.to_string())?;
-            let client = forge_sheet_sync::oauth::OAuthClient::load().map_err(|e| e.to_string())?;
-            let token =
-                forge_sheet_sync::oauth::access_token(alias, &client).map_err(|e| e.to_string())?;
+            let token = forge_sheet_sync::credentials::access_token(alias).map_err(|e| e.to_string())?;
             let sheets = forge_sheet_sync::sheets::google::GoogleSheets::new(token);
             let mut board = forge_sheet_sync::board_exec::BoardExec::connect(cql_host)
                 .map_err(|e| e.to_string())?;
@@ -3394,9 +3393,7 @@ fn run_mcp_server() -> anyhow::Result<()> {
             // OAuth/network call.
             let (mapping, state_path) =
                 forge_sheet_sync::resolve_alias(alias).map_err(|e| e.to_string())?;
-            let client = forge_sheet_sync::oauth::OAuthClient::load().map_err(|e| e.to_string())?;
-            let token =
-                forge_sheet_sync::oauth::access_token(alias, &client).map_err(|e| e.to_string())?;
+            let token = forge_sheet_sync::credentials::access_token(alias).map_err(|e| e.to_string())?;
             let sheets = forge_sheet_sync::sheets::google::GoogleSheets::new(token);
             let req = forge_sheet_sync::push_plan::PushRequest {
                 row_id,
@@ -6171,9 +6168,8 @@ fn handle_sheet(action: SheetAction, pretty: bool) -> anyhow::Result<()> {
             // Resolve the alias FIRST so a bad alias fails loud before the
             // interactive OAuth consent flow ever starts.
             forge_sheet_sync::resolve_alias(&alias)?;
-            let client = forge_sheet_sync::oauth::OAuthClient::load()?;
-            forge_sheet_sync::oauth::authorize(&alias, &client)?;
-            let out = serde_json::json!({ "authorized": true, "alias": alias });
+            let outcome = forge_sheet_sync::credentials::authorize(&alias)?;
+            let out = serde_json::json!({ "authorized": outcome.authorized, "method": outcome.method, "alias": alias });
             println!("{}", forge_shared::emit_json(&out, pretty)?);
         }
 
@@ -6185,8 +6181,7 @@ fn handle_sheet(action: SheetAction, pretty: bool) -> anyhow::Result<()> {
             // Resolve the alias FIRST so a bad alias fails loud before any
             // OAuth/CQL/network call.
             let (mapping, state_path) = forge_sheet_sync::resolve_alias(&alias)?;
-            let client = forge_sheet_sync::oauth::OAuthClient::load()?;
-            let token = forge_sheet_sync::oauth::access_token(&alias, &client)?;
+            let token = forge_sheet_sync::credentials::access_token(&alias)?;
             let sheets = forge_sheet_sync::sheets::google::GoogleSheets::new(token);
             let mut board = forge_sheet_sync::board_exec::BoardExec::connect(cql_host.as_deref())?;
             let report = forge_sheet_sync::pull(
@@ -6214,8 +6209,7 @@ fn handle_sheet(action: SheetAction, pretty: bool) -> anyhow::Result<()> {
             // `push` only writes back to the sheet — it never touches the
             // board — so the value is intentionally unused.
             let (mapping, state_path) = forge_sheet_sync::resolve_alias(&alias)?;
-            let client = forge_sheet_sync::oauth::OAuthClient::load()?;
-            let token = forge_sheet_sync::oauth::access_token(&alias, &client)?;
+            let token = forge_sheet_sync::credentials::access_token(&alias)?;
             let sheets = forge_sheet_sync::sheets::google::GoogleSheets::new(token);
             let req = forge_sheet_sync::push_plan::PushRequest {
                 row_id,
