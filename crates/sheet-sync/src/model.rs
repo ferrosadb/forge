@@ -109,9 +109,47 @@ pub struct Grid {
     pub rows: Vec<Vec<String>>,
 }
 
+/// One planned cell write: the A1-notation address, the mapped header it
+/// belongs to, and the value being replaced and the value replacing it.
+/// Produced by [`crate::push_plan::plan_push`]; a later (not-yet-built)
+/// writer task is responsible for actually sending it to the Sheets API.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CellEdit {
+    pub a1: String,
+    pub header: String,
+    pub old: String,
+    pub new: String,
+}
+
+/// Converts a 0-based column index to spreadsheet column letters
+/// (`0` → `"A"`, `25` → `"Z"`, `26` → `"AA"`, `27` → `"AB"`).
+///
+/// This is a bijective base-26 conversion (not plain base-26): there is no
+/// digit for zero, so each "digit" ranges `1..=26` rather than `0..=25`.
+/// Implemented by repeatedly taking `(n - 1) % 26` / `(n - 1) / 26` on the
+/// 1-based column number, prepending each resulting letter.
+pub fn col_index_to_a1(col0: usize) -> String {
+    let mut n = col0 + 1;
+    let mut letters = Vec::new();
+    while n > 0 {
+        let remainder = (n - 1) % 26;
+        letters.push((b'A' + remainder as u8) as char);
+        n = (n - 1) / 26;
+    }
+    letters.iter().rev().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn col_index_to_a1_covers_single_and_double_letter_boundaries() {
+        assert_eq!(col_index_to_a1(0), "A");
+        assert_eq!(col_index_to_a1(25), "Z");
+        assert_eq!(col_index_to_a1(26), "AA");
+        assert_eq!(col_index_to_a1(27), "AB");
+    }
 
     #[test]
     fn parses_every_documented_field_name() {
