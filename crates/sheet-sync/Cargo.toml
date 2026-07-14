@@ -11,8 +11,11 @@ anyhow = { workspace = true }
 toml = { workspace = true }
 forge-tasks = { path = "../tasks" }
 ureq = { version = "3", features = ["json"] }
-base64 = "0.22"
 dirs = { workspace = true }
+# Pinned to the same major as the getrandom already pulled in transitively
+# by the ureq -> rustls-platform-verifier -> ring chain (see Cargo.lock),
+# to avoid a duplicate major version in the dependency graph.
+getrandom = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

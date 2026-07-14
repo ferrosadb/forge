@@ -94,14 +94,28 @@ impl State {
 /// directory. Never fails the caller: a chmod failure (e.g. an unsupported
 /// filesystem) is not a reason to lose a successful write, and this is not
 /// a security boundary — see the module doc's "fail loud on genuine I/O
-/// failure" carve-out.
+/// failure" carve-out. Best-effort is not the same as silent, though: per
+/// the repo's disclosure rules (and mirroring `crate::oauth`'s identically
+/// named helper), each chmod failure is logged to stderr (path + OS error
+/// only, never file contents) so a permissive mode on a shared/multi-user
+/// machine is observable instead of hidden.
 #[cfg(unix)]
 fn tighten_permissions_best_effort(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!(
+            "warning: could not tighten permissions on {} : {e}",
+            path.display()
+        );
+    }
     if let Some(parent) = path.parent() {
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)) {
+            eprintln!(
+                "warning: could not tighten permissions on {} : {e}",
+                parent.display()
+            );
+        }
     }
 }
 

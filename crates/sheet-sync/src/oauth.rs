@@ -381,19 +381,17 @@ fn post_token_request(
     parse_token_response(&body)
 }
 
-/// Non-cryptographic but unpredictable-enough `state` value for the CSRF
-/// guard: mixes wall-clock time, process id, and the loopback port,
-/// base64url-encoded. This is I/O-adjacent glue (not the deterministic
-/// pure engine), so `SystemTime`/`process::id` are fine here — see the
-/// crate's task brief. Deliberately not unit-tested (nothing pure to
-/// assert about randomness).
-fn generate_state(port: u16) -> String {
-    use base64::Engine as _;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let raw = format!("{}-{}-{}", now.as_nanos(), std::process::id(), port);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+/// Cryptographically random `state` value for the CSRF guard: 16 bytes
+/// from the OS CSPRNG (via `getrandom`), hex-encoded to 32 characters.
+/// Fails loud if the CSPRNG errors — silently falling back to a weaker,
+/// predictable value (e.g. time/pid-derived) would defeat the CSRF guard
+/// this value exists to provide, so callers must propagate the error
+/// rather than swallow it.
+fn generate_state() -> anyhow::Result<String> {
+    let mut buf = [0u8; 16];
+    getrandom::getrandom(&mut buf)
+        .map_err(|e| anyhow::anyhow!("oauth: failed to generate CSRF state nonce: {e}"))?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The on-disk refresh-token cache shape: `{ "refresh_token": "..." }`.
@@ -403,13 +401,21 @@ struct TokenCache {
 }
 
 /// Path to the cached refresh token for `alias`:
-/// `dirs::config_dir()/forge/sheet-sync/<alias>.json`.
-pub fn token_cache_path(alias: &str) -> PathBuf {
-    dirs::config_dir()
-        .expect("oauth: no config directory available on this platform")
+/// `dirs::config_dir()/forge/sheet-sync/<alias>.json`. Fails loud, rather
+/// than panicking, when `dirs::config_dir()` returns `None` (a platform
+/// with no conventional config directory) — this is a `pub` library
+/// function, and a library must never `panic!`/`.expect()` its way out of
+/// a recoverable, callable-in-any-context condition.
+pub fn token_cache_path(alias: &str) -> anyhow::Result<PathBuf> {
+    let config_dir = dirs::config_dir().ok_or_else(|| {
+        anyhow::anyhow!(
+            "oauth: no config directory available on this platform — cannot locate the token cache for alias {alias:?}"
+        )
+    })?;
+    Ok(config_dir
         .join("forge")
         .join("sheet-sync")
-        .join(format!("{alias}.json"))
+        .join(format!("{alias}.json")))
 }
 
 /// Best-effort 0600/0700-style tightening of the token cache file and its
@@ -449,7 +455,7 @@ fn tighten_permissions_best_effort(_path: &Path) {}
 /// Persists `refresh_token` to `alias`'s cache file, creating parent dirs
 /// and best-effort chmod'ing to 0600/0700.
 fn save_refresh_token(alias: &str, refresh_token: &str) -> anyhow::Result<()> {
-    let path = token_cache_path(alias);
+    let path = token_cache_path(alias)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             anyhow::anyhow!(
@@ -476,7 +482,7 @@ fn save_refresh_token(alias: &str, refresh_token: &str) -> anyhow::Result<()> {
 /// Loads the cached refresh token for `alias`. Fails loud, telling the
 /// caller how to fix it, if no cache exists yet.
 fn load_refresh_token(alias: &str) -> anyhow::Result<String> {
-    let path = token_cache_path(alias);
+    let path = token_cache_path(alias)?;
     let body = std::fs::read_to_string(&path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             anyhow::anyhow!(
@@ -514,7 +520,7 @@ pub fn authorize(alias: &str, client: &OAuthClient) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("oauth: failed to read loopback listener address: {e}"))?
         .port();
     let redirect_uri = format!("http://127.0.0.1:{port}/");
-    let expected_state = generate_state(port);
+    let expected_state = generate_state()?;
 
     let auth_url = build_auth_url(client, &redirect_uri, &expected_state, SHEETS_SCOPE);
     eprintln!("Open this URL to authorize:\n{auth_url}");
@@ -797,7 +803,25 @@ mod tests {
 
     #[test]
     fn token_cache_path_uses_alias_and_forge_sheet_sync_dir() {
-        let path = token_cache_path("spoton-qa");
+        let path = token_cache_path("spoton-qa")
+            .expect("test environment has a config dir on every supported CI platform");
         assert!(path.ends_with("forge/sheet-sync/spoton-qa.json"));
+    }
+
+    /// Can't assert true randomness in a unit test, but this pins down the
+    /// two properties that matter for a CSRF `state` nonce: fixed 32-hex-
+    /// char shape, and two successive calls not producing the same value
+    /// (which would indicate a broken/stubbed RNG rather than an actual
+    /// entropy source).
+    #[test]
+    fn generate_state_is_32_hex_chars_and_varies_between_calls() {
+        let a = generate_state().expect("CSPRNG available in test environment");
+        let b = generate_state().expect("CSPRNG available in test environment");
+
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(b.len(), 32);
+        assert!(b.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 }
