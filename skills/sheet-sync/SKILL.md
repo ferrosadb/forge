@@ -20,9 +20,54 @@ Priority, MVP flag, early/terminal Status); the board owns dev progress
    `dev_writable_status`, and `terminal_status` ordered *before*
    `[columns]`/`[status_map]` — TOML nests a bare array under whatever table
    most recently opened, so putting it after breaks the file silently.
-3. Set `FORGE_GOOGLE_OAUTH_CLIENT` to the path of a Google **Desktop** OAuth
+3. Pick an auth path — **service account (below) for any agent/headless
+   run**, or interactive OAuth if a human is driving from a laptop:
+
+### Headless setup (service account — recommended for agents)
+
+This is the easy path and the only one that works unattended: no browser,
+no interactive consent, and `frg sheet auth` becomes a no-op once it's
+configured. Use this for any autonomous/CI/agent run — the interactive
+OAuth flow below opens a browser and **blocks forever in a headless
+environment**.
+
+1. Run the provisioning helper (requires the `gcloud` CLI, already logged
+   in via `gcloud auth login`):
+   ```sh
+   crates/sheet-sync/examples/provision-service-account.sh
+   ```
+   Or point it at a project you already own: `PROJECT=my-project
+   crates/sheet-sync/examples/provision-service-account.sh`. Either way,
+   note the **service-account email** it prints at the end (looks like
+   `sheet-sync@<project>.iam.gserviceaccount.com`).
+2. **Share the client's Google Sheet with that SA email as Editor.** This
+   is the step that actually grants access — a fresh service account can
+   read/write nothing until you do this, regardless of how the key was
+   minted.
+3. Point forge at the downloaded key, either:
+   ```sh
+   export FORGE_GOOGLE_SERVICE_ACCOUNT=/path/to/sa-key.json
+   ```
+   or in `.forge/config.toml`:
+   ```toml
+   [google]
+   service_account_path = "/path/to/sa-key.json"
+   ```
+4. Go straight to `frg sheet pull <alias>` / `frg sheet push` — **do not
+   run `frg sheet auth`**; with a service account configured it's a no-op
+   (there's nothing to consent to).
+5. Confirm the CQL task board host is also set — `FORGE_CQL_HOST` env or
+   `cql_host` in `.forge/config.toml` — since `pull`/`push` upsert into
+   that board, not just the sheet.
+
+### Interactive setup (OAuth — for a human on a laptop)
+
+Only needed if you're *not* using a service account. Blocks on a browser
+consent screen, so it's unsuitable for headless/agent runs.
+
+1. Set `FORGE_GOOGLE_OAUTH_CLIENT` to the path of a Google **Desktop** OAuth
    `client_secret.json`.
-4. Run `frg sheet auth <alias>` once. This opens a browser consent flow and
+2. Run `frg sheet auth <alias>` once. This opens a browser consent flow and
    caches a refresh token — one-time per alias/machine.
 
 ## Pull

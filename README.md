@@ -278,6 +278,21 @@ loop over them.
    ```
    The OAuth scope is limited to `spreadsheets`.
 
+### Headless auth (service account)
+
+For agents/CI, or anyone who'd rather skip the browser consent flow
+entirely: run
+[`crates/sheet-sync/examples/provision-service-account.sh`](crates/sheet-sync/examples/provision-service-account.sh)
+(requires `gcloud`, already logged in) to create a Google service account
+and download its key JSON, then **share the target Google Sheet with the
+printed service-account email as Editor** — a fresh service account has no
+access to anything until you do this. Point forge at the key —
+`export FORGE_GOOGLE_SERVICE_ACCOUNT=/path/to/sa-key.json` (or
+`[google] service_account_path` in `.forge/config.toml`) — and skip
+`frg sheet auth` entirely: it's a no-op once a service account is
+configured, and `frg sheet pull`/`push` mint tokens directly, no browser
+required.
+
 ### Workflow
 
 ```sh

@@ -42,11 +42,29 @@ const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// grant. Deliberately does not carry the raw JSON's other fields
 /// (`project_id`, `private_key_id`, `client_id`, ...) — nothing downstream
 /// of this crate needs them.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written rather than derived — see the manual `impl`
+/// below — because `private_key_pem` is a bearer secret that must never
+/// land in a log line or error message via an incidental `{:?}`.
+#[derive(Clone)]
 pub struct ServiceAccount {
     pub client_email: String,
     pub private_key_pem: String,
     pub token_uri: String,
+}
+
+/// Redacts `private_key_pem`: only `client_email`/`token_uri` (both
+/// non-secret identifiers) are printed, matching this module's doc-comment
+/// guarantee that the private key never appears in a log line or error
+/// message.
+impl std::fmt::Debug for ServiceAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceAccount")
+            .field("client_email", &self.client_email)
+            .field("private_key_pem", &"<redacted>")
+            .field("token_uri", &self.token_uri)
+            .finish()
+    }
 }
 
 /// The subset of a Google service-account key JSON's fields this crate
@@ -375,6 +393,25 @@ mod tests {
         // this is a coarse sanity check that decoding produced real bytes,
         // not an empty/garbage buffer.
         assert!(der.len() > 512);
+    }
+
+    #[test]
+    fn service_account_debug_redacts_private_key_but_keeps_client_email() {
+        let sa = test_sa();
+        let debug_output = format!("{sa:?}");
+        assert!(
+            !debug_output.contains(FIXTURE_KEY_PEM),
+            "Debug output must not contain the raw private key body: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("BEGIN PRIVATE KEY"),
+            "Debug output must not contain the PEM key markers: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("t@x.iam"),
+            "Debug output should still identify the service account by client_email: {debug_output}"
+        );
+        assert!(debug_output.contains("<redacted>"));
     }
 
     #[test]
