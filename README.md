@@ -139,6 +139,16 @@ scrubbed text. No LLM summarizer is invoked in the search path.
 | `frg checklist <action>` | Persistent workflow checklists with DAG dependencies |
 | `frg fmem-skill-ingest [dir]` | Ingest the SKILL.md catalog into ferrosa-memory as typed skill entities |
 
+### Google Sheets sync
+
+Two-way sync between a Google Sheet of bugs and the CQL task board. See [Google Sheets sync](#google-sheets-sync-1) for setup.
+
+| Command | Description |
+|---------|-------------|
+| `frg sheet auth <alias>` | Run the one-time Google OAuth consent flow and cache a refresh token |
+| `frg sheet pull <alias> [--dry-run]` | Upsert open sheet rows into the task board (idempotent, never-move-backward) |
+| `frg sheet push <alias> <row_id> [--status S] [--fix-ver V] [--notes N] [--dry-run]` | Write status/fix-version/resolution-notes back to the row's own cells |
+
 ### Language-specific toolchain wrappers
 
 Each wrapper parses native output into structured JSON with error locations, warning counts, and an actionable `hint` field on failure.
@@ -220,6 +230,9 @@ The MCP server (activated by `frg run`) exposes the same functionality directly 
 | `task_create` | `frg task create` |
 | `task_update` | `frg task update` |
 | `task_board` | `frg task board` |
+| `sheet_auth` | `frg sheet auth` |
+| `sheet_pull` | `frg sheet pull` |
+| `sheet_push` | `frg sheet push` |
 | `cargo` (tier 2) | `frg run cargo` |
 | `go_tools` (tier 2) | `frg run go` |
 | `dotnet` (tier 2) | `frg run dotnet` |
@@ -228,6 +241,70 @@ The MCP server (activated by `frg run`) exposes the same functionality directly 
 | `mix_*` (tier 2) | `frg run mix` |
 
 ---
+
+## Google Sheets sync
+
+Drive development from a Google Sheet of bugs: pull open rows into the CQL task
+board, work them, and push fix status back to the sheet — writing only the
+columns you designate, never touching the owner's other cells. Useful when a
+client or QA team files bugs in a spreadsheet they own and you want an agentic
+loop over them.
+
+### One-time setup
+
+1. **Create a Google OAuth client.** In the
+   [Google Cloud Console](https://console.cloud.google.com/): *APIs & Services →
+   enable the **Google Sheets API** → Credentials → Create credentials → OAuth
+   client ID → Application type: **Desktop app*** → download the
+   `client_secret.json`.
+2. **Point forge at it** via env var (or `[google] client_secret_path` in
+   `.forge/config.toml`):
+   ```sh
+   export FORGE_GOOGLE_OAUTH_CLIENT=/path/to/client_secret.json
+   ```
+3. **Write a per-sheet mapping** at `.forge/sheets/<alias>.toml` — copy and edit
+   [`crates/sheet-sync/examples/spoton-qa.toml`](crates/sheet-sync/examples/spoton-qa.toml).
+   It declares the `spreadsheet_id`, `tab`, the `id_column` (the sheet's stable
+   per-row id), a header→field `[columns]` map, the `writable` columns (the only
+   ones `push` may ever write), a `status_map` (sheet status → task status), and
+   the `dev_writable_status` / `terminal_status` sets that drive the write-back
+   handoff. Top-level array keys must appear **before** the `[columns]` /
+   `[status_map]` tables (a TOML rule). `.forge/` is git-ignored, so your real
+   ids and mappings stay local.
+4. **Authorize once** — opens a browser consent page and caches a refresh token
+   under `~/.config/forge/sheet-sync/` (stored `0600`, never logged):
+   ```sh
+   frg sheet auth <alias>
+   ```
+   The OAuth scope is limited to `spreadsheets`.
+
+### Workflow
+
+```sh
+frg sheet pull <alias> --dry-run     # preview what would import
+frg sheet pull <alias>               # upsert open rows into the task board
+# ...pick a task, fix the bug, then:
+frg sheet push <alias> <row_id> \
+    --status "In Progress" --fix-ver "<git sha on demo | version tag on prod>" \
+    --notes "what was done" --dry-run          # preview the exact cell diff
+frg sheet push <alias> <row_id> --status "In Progress" --fix-ver "abc1234" --notes "..."
+```
+
+`pull` is idempotent — keyed by the sheet's row id, tracked in a sidecar
+`.forge/sheets/<alias>.state.toml` — and never moves a task backward. The task
+board is the CQL store (`FORGE_CQL_HOST`, same as `frg task`).
+
+### Write-back safety
+
+- Only the configured `writable` columns are ever written — enforced in the
+  planner **and** re-checked at the write boundary.
+- Rows are matched by normalized id; **duplicate ids, or duplicate mapped-header
+  text, fail loud** rather than risk writing the wrong cell.
+- Status is only ever advanced to a **dev-owned** value (e.g. *In Progress*, *In
+  Review*, *Fixed - Needs Verification*); client-owned or terminal states (*New*,
+  *Verified/Closed*, *Won't Fix*, …) are never overwritten. `fix_ver` and
+  resolution notes are always yours to write.
+- `--dry-run` on both commands prints the effect and writes nothing.
 
 ## PDF ingestion
 
