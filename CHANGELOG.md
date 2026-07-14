@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Added
+- **Google Sheets ↔ task board sync.** New `frg sheet auth|pull|push` and MCP
+  `sheet_auth`/`sheet_pull`/`sheet_push`: pull open rows from a Google Sheet of
+  bugs into the CQL task board (idempotent, never-move-backward) and push
+  status/fix-version/resolution-notes back to the sheet's own cells, writing
+  only the configured `writable` columns with a lifecycle-handoff guard. OAuth
+  (installed-app loopback, `spreadsheets` scope) via `FORGE_GOOGLE_OAUTH_CLIENT`;
+  per-sheet mapping at `.forge/sheets/<alias>.toml` (see
+  `crates/sheet-sync/examples/spoton-qa.toml`).
 - **Trusted web read/search tools.** Added `frg fetch-url` / MCP `fetch_url` for
   read-only page extraction through Forge's own HTTP path (no persistence, no
   third-party extraction provider, no auxiliary LLM), plus `frg web-search` /

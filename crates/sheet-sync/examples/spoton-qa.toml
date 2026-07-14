@@ -1,0 +1,42 @@
+# Example forge sheet-sync mapping. Copy to .forge/sheets/<alias>.toml (git-ignored) and run: frg sheet auth <alias>
+
+# NOTE: TOML top-level keys (including these arrays) MUST precede any [table];
+# a bare `writable = […]` after [columns] would nest as `columns.writable`.
+spreadsheet_id = "EXAMPLE_SPREADSHEET_ID"
+tab            = "QA Log"
+id_column      = "QA Log ID"
+
+writable = ["status", "fix_ver", "resolution_notes"]
+# Which sheet-side states are ours to advance (handoff); everything else is client-owned.
+dev_writable_status = ["In Progress", "In Review", "Fixed - Needs Verification"]
+# Terminal on the sheet: skip on import, and never push status onto these.
+terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
+
+[columns]                       # sheet header -> canonical field
+"QA Log ID"          = "id"
+"Title"              = "title"
+"Type"               = "type"
+"Category"           = "category"
+"Description"        = "description"
+"Steps to Reproduce" = "steps"
+"Expected Result"    = "expected"
+"Actual Result"      = "actual"
+"Environment"        = "environment"
+"Severity"           = "severity"
+"Priority"           = "priority"
+"MVP Blocker?"       = "mvp_blocker"
+"Status"             = "status"
+"Build/Version Fixed (git commit for demo, version tag for prod)" = "fix_ver"
+"Resolution Notes"   = "resolution_notes"
+
+# Status lifecycle → forge TaskStatus (many-to-one on pull)
+[status_map]
+"New"                       = "triage"
+"Triaged"                   = "ready"
+"In Progress"               = "in_progress"
+"In Review"                 = "in_progress"
+"Fixed - Needs Verification" = "complete"
+"Verified/Closed"           = "archived"
+"Won't Fix"                 = "archived"
+"Duplicate"                 = "archived"
+"Deferred"                  = "blocked"
