@@ -50,13 +50,15 @@ pub fn ensure_unique_mapped_headers(grid: &Grid, mapping: &SheetMapping) -> anyh
 /// surviving canonical rows, plus the ids that were excluded and why.
 ///
 /// `rows` never contains a row whose normalized id appears in
-/// `duplicate_ids` or whose normalized id was recorded in
-/// `skipped_terminal` — both are exclusions, not just annotations.
+/// `duplicate_ids`, whose normalized id was recorded in `skipped_terminal`,
+/// or whose normalized id was recorded in `skipped_empty` — all three are
+/// exclusions, not just annotations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MappedGrid {
     pub rows: Vec<CanonicalRow>,
     pub skipped_terminal: Vec<String>,
     pub duplicate_ids: Vec<String>,
+    pub skipped_empty: Vec<String>,
 }
 
 /// Maps `grid` to canonical rows using `mapping`.
@@ -80,6 +82,11 @@ pub struct MappedGrid {
 /// 3. A row whose mapped Status cell is in `mapping.terminal_status` is
 ///    excluded from `rows` and its normalized id recorded in
 ///    `skipped_terminal`.
+/// 4. A row with a blank/absent `Title` cell is an empty template row (e.g.
+///    the QA sheet auto-fills the id column hundreds of rows past the last
+///    real bug), not a real bug — a real bug always has a Title. Excluded
+///    from `rows` and its normalized id recorded in `skipped_empty`. Same
+///    heuristic as the working Python sync.
 ///
 /// Rows may be ragged (the Sheets API omits trailing empty cells): any
 /// cell index beyond a row's length is treated as `""`, never a panic.
@@ -110,6 +117,11 @@ pub fn map_grid(grid: &Grid, mapping: &SheetMapping) -> anyhow::Result<MappedGri
         .iter()
         .find(|(_, field)| **field == CanonicalField::Status)
         .map(|(header, _)| header.as_str());
+    let title_header = mapping
+        .columns
+        .iter()
+        .find(|(_, field)| **field == CanonicalField::Title)
+        .map(|(header, _)| header.as_str());
 
     let normalized_ids: Vec<String> = grid
         .rows
@@ -121,6 +133,7 @@ pub fn map_grid(grid: &Grid, mapping: &SheetMapping) -> anyhow::Result<MappedGri
 
     let mut rows = Vec::new();
     let mut skipped_terminal = Vec::new();
+    let mut skipped_empty = Vec::new();
 
     for (sheet_row_index, row) in grid.rows.iter().enumerate() {
         let normalized = normalize_id(cell(row, id_index));
@@ -134,6 +147,13 @@ pub fn map_grid(grid: &Grid, mapping: &SheetMapping) -> anyhow::Result<MappedGri
             let status_value = cell(row, header_index[status_header]);
             if mapping.terminal_status.contains(status_value) {
                 skipped_terminal.push(normalized);
+                continue;
+            }
+        }
+        if let Some(title_header) = title_header {
+            let title_value = cell(row, header_index[title_header]).trim();
+            if title_value.is_empty() {
+                skipped_empty.push(normalized);
                 continue;
             }
         }
@@ -157,6 +177,7 @@ pub fn map_grid(grid: &Grid, mapping: &SheetMapping) -> anyhow::Result<MappedGri
         rows,
         skipped_terminal,
         duplicate_ids,
+        skipped_empty,
     })
 }
 
@@ -443,6 +464,70 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
         assert!(
             err.to_string().contains("Status"),
             "error should mention the duplicated header, got: {err}"
+        );
+    }
+
+    // -- empty-template rows (id present, blank/absent Title) -------------
+
+    #[test]
+    fn empty_title_row_is_skipped_not_mapped() {
+        let grid = Grid {
+            headers: qa_headers(),
+            rows: vec![
+                // (a) a normal Bug row WITH a Title.
+                row(&[
+                    "QA-100",
+                    "Real bug title",
+                    "Bug",
+                    "UI",
+                    "desc",
+                    "steps",
+                    "expected",
+                    "actual",
+                    "env",
+                    "Medium",
+                    "P2",
+                    "No",
+                    "New",
+                    "",
+                    "",
+                ]),
+                // (b) a valid id but BLANK Title — sheet auto-fill artifact.
+                row(&[
+                    "QA-101", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                ]),
+                // (c) id + Title present but Title is whitespace-only.
+                row(&[
+                    "QA-102", "   ", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                ]),
+            ],
+        };
+
+        let mapped = map_grid(&grid, &qa_mapping()).expect("mapping should succeed");
+
+        assert_eq!(mapped.rows.len(), 1, "only QA-100 should survive mapping");
+        assert_eq!(mapped.rows[0].id, "QA-100");
+
+        assert_eq!(
+            mapped.skipped_empty,
+            vec!["QA-101".to_string(), "QA-102".to_string()],
+            "blank and whitespace-only Title rows should both land in skipped_empty"
+        );
+
+        assert!(
+            !mapped
+                .rows
+                .iter()
+                .any(|r| r.id == "QA-101" || r.id == "QA-102"),
+            "empty-title rows must not appear in rows"
+        );
+        assert!(
+            mapped.duplicate_ids.is_empty(),
+            "empty-title rows must not be reported as duplicates"
+        );
+        assert!(
+            mapped.skipped_terminal.is_empty(),
+            "empty-title rows must not be reported as terminal skips"
         );
     }
 

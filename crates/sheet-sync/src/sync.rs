@@ -44,6 +44,7 @@ pub struct PullReport {
     pub skipped: usize,
     pub skipped_terminal: Vec<String>,
     pub duplicate_ids: Vec<String>,
+    pub skipped_empty: usize,
     pub dry_run: bool,
 }
 
@@ -123,6 +124,7 @@ pub fn pull(
             skipped,
             skipped_terminal: mapped.skipped_terminal,
             duplicate_ids: mapped.duplicate_ids,
+            skipped_empty: mapped.skipped_empty.len(),
             dry_run: true,
         });
     }
@@ -179,6 +181,7 @@ pub fn pull(
         skipped,
         skipped_terminal: mapped.skipped_terminal,
         duplicate_ids: mapped.duplicate_ids,
+        skipped_empty: mapped.skipped_empty.len(),
         dry_run: false,
     })
 }
@@ -532,6 +535,59 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
         assert!(
             !reloaded.rows.contains_key("QA-011"),
             "QA-011 (the row whose apply failed) must not be in state — a re-pull should retry it"
+        );
+    }
+
+    // -- pull: empty-template rows (id present, blank Title) --------------
+
+    /// Same shape as `qa_row`, but the Title cell is blank — reproduces the
+    /// QA sheet's auto-filled id column: id present, no bug content.
+    fn qa_empty_template_row(id: &str) -> Vec<String> {
+        row(&[id, "", "", "", "", "", "", "", "", "", "", "", "", "", ""])
+    }
+
+    #[test]
+    fn pull_skips_empty_template_rows_and_does_not_create_them() {
+        let mapping = qa_mapping();
+        let grid = Grid {
+            headers: qa_headers(),
+            rows: vec![
+                qa_row("QA-030", "New"),
+                qa_empty_template_row("QA-031"),
+                qa_empty_template_row("QA-032"),
+            ],
+        };
+        let sheets = FakeSheets::new(grid);
+        let mut board = FakeBoard::new();
+        let tmpdir = tempfile::tempdir().expect("tempdir creation");
+        let state_path = state_path_in(&tmpdir);
+
+        let report = pull(
+            &sheets,
+            &mut board,
+            &mapping,
+            &state_path,
+            &PullOptions { dry_run: false },
+        )
+        .expect("pull should succeed");
+
+        assert_eq!(
+            report.skipped_empty, 2,
+            "both empty-template rows should be reported as skipped_empty"
+        );
+        assert_eq!(report.created, 1, "only QA-030 is a real, importable row");
+
+        let create_rows: Vec<&str> = board
+            .applied
+            .iter()
+            .filter(|(kind, _)| kind == "create")
+            .map(|(_, row_id)| row_id.as_str())
+            .collect();
+        assert_eq!(
+            create_rows,
+            vec!["QA-030"],
+            "empty-template rows must never be applied to the board: {:?}",
+            board.applied
         );
     }
 
