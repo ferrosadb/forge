@@ -10,6 +10,9 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 toml = { workspace = true }
 forge-tasks = { path = "../tasks" }
+ureq = { version = "3", features = ["json"] }
+base64 = "0.22"
+dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

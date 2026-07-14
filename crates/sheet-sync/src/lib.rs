@@ -16,6 +16,7 @@ pub mod config;
 pub mod mapping;
 pub mod model;
 pub mod normalize;
+pub mod oauth;
 pub mod push_plan;
 pub mod sheets;
 pub mod state;

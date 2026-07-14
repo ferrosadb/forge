@@ -222,7 +222,7 @@ pub fn push(
         let wrote_status =
             status_header.is_some_and(|header| edits.iter().any(|edit| &edit.header == header));
 
-        sheets.write_cells(&mapping.spreadsheet_id, &edits)?;
+        sheets.write_cells(&mapping.spreadsheet_id, &mapping.tab, &edits)?;
         if wrote_status {
             if let Some(entry) = state.rows.get_mut(&req.row_id) {
                 entry.last_push_status = req.status.clone();

@@ -957,11 +957,14 @@ name = "forge-sheet-sync"
 version = "0.15.0"
 dependencies = [
  "anyhow",
+ "base64",
+ "dirs",
  "forge-tasks",
  "serde",
  "serde_json",
  "tempfile",
  "toml",
+ "ureq",
 ]
 
 [[package]]
