@@ -14,7 +14,7 @@ use crate::board::BoardSink;
 use crate::board_plan::{content_hash, plan_pull, BoardOp};
 use crate::config::SheetMapping;
 use crate::mapping::map_grid;
-use crate::model::{CanonicalRow, CellEdit};
+use crate::model::{CanonicalField, CanonicalRow, CellEdit};
 use crate::push_plan::{plan_push, PushRequest};
 use crate::sheets::SheetsApi;
 use crate::state::{State, StateEntry};
@@ -207,9 +207,26 @@ pub fn push(
     let wrote = if opts.dry_run || edits.is_empty() {
         false
     } else {
+        // `last_push_status` must record the status WE last *wrote* to the
+        // sheet, not merely the status the caller *requested* — a
+        // fix_ver/notes-only push (`req.status: None`) must not clobber a
+        // real prior value back to `None`, and a status edit dropped by
+        // `plan_push`'s terminal/handoff gate must not phantom-record a
+        // status that was never actually written. So only update it when a
+        // Status-column edit is present in `edits`.
+        let status_header: Option<&String> = mapping
+            .columns
+            .iter()
+            .find(|(_, field)| **field == CanonicalField::Status)
+            .map(|(header, _)| header);
+        let wrote_status =
+            status_header.is_some_and(|header| edits.iter().any(|edit| &edit.header == header));
+
         sheets.write_cells(&mapping.spreadsheet_id, &edits)?;
-        if let Some(entry) = state.rows.get_mut(&req.row_id) {
-            entry.last_push_status = req.status.clone();
+        if wrote_status {
+            if let Some(entry) = state.rows.get_mut(&req.row_id) {
+                entry.last_push_status = req.status.clone();
+            }
         }
         state.save(state_path)?;
         true
@@ -531,6 +548,159 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
         assert_eq!(
             reloaded.rows["QA-020"].last_push_status,
             Some("In Progress".to_string())
+        );
+    }
+
+    // -- push: last_push_status gating (only record when Status was written) --
+
+    #[test]
+    fn push_fix_ver_only_does_not_clobber_last_push_status() {
+        let mapping = qa_mapping();
+        // QA-020's current sheet Status is "New" (not terminal), so this is
+        // a plain fix_ver-only push with no status edit at all.
+        let sheets = FakeSheets::new(push_fixture_grid());
+        let tmpdir = tempfile::tempdir().expect("tempdir creation");
+        let state_path = state_path_in(&tmpdir);
+
+        let mut state = State::default();
+        state.upsert(
+            "QA-020".to_string(),
+            StateEntry {
+                task_id: "t_existing01".to_string(),
+                content_hash: "fnv1a:whatever".to_string(),
+                last_push_status: Some("In Progress".to_string()),
+            },
+        );
+        state.save(&state_path).expect("seed state save");
+
+        let req = PushRequest {
+            row_id: "QA-020".to_string(),
+            status: None,
+            fix_ver: Some("v1.2.3".to_string()),
+            notes: None,
+        };
+
+        let report = push(
+            &sheets,
+            &mapping,
+            &state_path,
+            &req,
+            &PushOptions { dry_run: false },
+        )
+        .expect("real push should succeed");
+
+        assert!(report.wrote, "fix_ver edit should still be written");
+        assert_eq!(report.edits.len(), 1);
+        assert_eq!(
+            report.edits[0].header,
+            "Build/Version Fixed (git commit for demo, version tag for prod)"
+        );
+
+        let reloaded = State::load(&state_path).expect("reload should succeed");
+        assert_eq!(
+            reloaded.rows["QA-020"].last_push_status,
+            Some("In Progress".to_string()),
+            "a fix_ver-only push must not clobber a prior last_push_status"
+        );
+    }
+
+    #[test]
+    fn push_terminal_gated_status_does_not_record_phantom_last_push_status() {
+        let mapping = qa_mapping();
+        // QA-021's current sheet Status is "Won't Fix" -> terminal_status,
+        // so the requested status edit is dropped by the handoff gate, but
+        // the fix_ver edit is still requested and writable.
+        let sheets = FakeSheets::new(push_fixture_grid());
+        let tmpdir = tempfile::tempdir().expect("tempdir creation");
+        let state_path = state_path_in(&tmpdir);
+
+        let mut state = State::default();
+        state.upsert(
+            "QA-021".to_string(),
+            StateEntry {
+                task_id: "t_existing02".to_string(),
+                content_hash: "fnv1a:whatever".to_string(),
+                last_push_status: Some("Triaged".to_string()),
+            },
+        );
+        state.save(&state_path).expect("seed state save");
+
+        let req = PushRequest {
+            row_id: "QA-021".to_string(),
+            status: Some("In Progress".to_string()),
+            fix_ver: Some("v9".to_string()),
+            notes: None,
+        };
+
+        let report = push(
+            &sheets,
+            &mapping,
+            &state_path,
+            &req,
+            &PushOptions { dry_run: false },
+        )
+        .expect("real push should succeed");
+
+        assert!(report.wrote, "fix_ver edit should still be written");
+        assert_eq!(report.edits.len(), 1, "status edit must be gated out");
+        assert_eq!(
+            report.edits[0].header,
+            "Build/Version Fixed (git commit for demo, version tag for prod)"
+        );
+
+        let reloaded = State::load(&state_path).expect("reload should succeed");
+        assert_eq!(
+            reloaded.rows["QA-021"].last_push_status,
+            Some("Triaged".to_string()),
+            "a gated-out status edit must not phantom-record the requested status"
+        );
+    }
+
+    #[test]
+    fn push_real_status_write_records_last_push_status() {
+        let mapping = qa_mapping();
+        // QA-020's current sheet Status is "New" (not terminal), and
+        // "In Progress" is dev_writable, so the status edit is emitted.
+        let sheets = FakeSheets::new(push_fixture_grid());
+        let tmpdir = tempfile::tempdir().expect("tempdir creation");
+        let state_path = state_path_in(&tmpdir);
+
+        let mut state = State::default();
+        state.upsert(
+            "QA-020".to_string(),
+            StateEntry {
+                task_id: "t_existing03".to_string(),
+                content_hash: "fnv1a:whatever".to_string(),
+                last_push_status: None,
+            },
+        );
+        state.save(&state_path).expect("seed state save");
+
+        let req = PushRequest {
+            row_id: "QA-020".to_string(),
+            status: Some("In Progress".to_string()),
+            fix_ver: None,
+            notes: None,
+        };
+
+        let report = push(
+            &sheets,
+            &mapping,
+            &state_path,
+            &req,
+            &PushOptions { dry_run: false },
+        )
+        .expect("real push should succeed");
+
+        assert!(report.wrote);
+        assert_eq!(report.edits.len(), 1);
+        assert_eq!(report.edits[0].header, "Status");
+
+        let reloaded = State::load(&state_path).expect("reload should succeed");
+        assert_eq!(
+            reloaded.rows["QA-020"].last_push_status,
+            Some("In Progress".to_string()),
+            "a real status write must record the pushed status"
         );
     }
 
