@@ -457,6 +457,12 @@ enum Commands {
         action: TaskAction,
     },
 
+    /// Google Sheets ↔ forge task board sync
+    Sheet {
+        #[command(subcommand)]
+        action: SheetAction,
+    },
+
     /// Ingest the SKILL.md catalog into ferrosa-memory via the `ingest_skill` MCP tool.
     ///
     /// Four-phase pipeline: (A) taxonomy seed from tag-hierarchy.yaml,
@@ -1101,6 +1107,58 @@ enum TaskAction {
     },
     /// Show the kanban board
     Board {
+        /// CQL host (overrides FORGE_CQL_HOST / .forge/config.toml; default 127.0.0.1:9042)
+        #[arg(long)]
+        cql_host: Option<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Sheet subcommand actions
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum SheetAction {
+    /// Run the interactive Google OAuth consent flow for `alias` and cache
+    /// its refresh token, so later pull/push runs don't need to re-consent.
+    Auth {
+        /// Sheet alias (matches `.forge/sheets/<alias>.toml`)
+        alias: String,
+    },
+    /// Pull open rows from the sheet into the forge task board, creating or
+    /// updating tasks per the alias's mapping.
+    Pull {
+        /// Sheet alias (matches `.forge/sheets/<alias>.toml`)
+        alias: String,
+        /// Compute and report what pull would do without writing to the
+        /// board or the sidecar state file
+        #[arg(long)]
+        dry_run: bool,
+        /// CQL host (overrides FORGE_CQL_HOST / .forge/config.toml; default 127.0.0.1:9042)
+        #[arg(long)]
+        cql_host: Option<String>,
+    },
+    /// Push a task's status/fix-version/resolution-notes back to its sheet
+    /// row.
+    Push {
+        /// Sheet alias (matches `.forge/sheets/<alias>.toml`)
+        alias: String,
+        /// The sheet row's id (matches the mapping's `id_column`)
+        row_id: String,
+        /// New status to write back (must be sheet-writable and non-terminal
+        /// per the alias's mapping; silently gated otherwise)
+        #[arg(long)]
+        status: Option<String>,
+        /// New fix-version value to write back
+        #[arg(long)]
+        fix_ver: Option<String>,
+        /// New resolution-notes value to write back
+        #[arg(long)]
+        notes: Option<String>,
+        /// Compute and report the edits push would make without writing to
+        /// the sheet or the sidecar state file
+        #[arg(long)]
+        dry_run: bool,
         /// CQL host (overrides FORGE_CQL_HOST / .forge/config.toml; default 127.0.0.1:9042)
         #[arg(long)]
         cql_host: Option<String>,
@@ -3243,6 +3301,121 @@ fn run_mcp_server() -> anyhow::Result<()> {
         }
     );
 
+    // sheet_auth — run the interactive Google OAuth consent flow for a
+    // sheet-sync alias and cache its refresh token.
+    register_tool!(server, "sheet_auth",
+        "Run the interactive Google OAuth consent flow for a sheet-sync alias (matching `.forge/sheets/<alias>.toml`) and cache its refresh token, so later sheet_pull/sheet_push calls don't need to re-consent. Opens a local browser-based loopback flow — run this once per alias in an environment where a browser can complete the Google consent screen. Returns {\"authorized\":true,\"alias\":<alias>} on success.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "alias": {"type": "string", "description": "Sheet alias (matches .forge/sheets/<alias>.toml)"}
+            },
+            "required": ["alias"]
+        }),
+        |args| {
+            let alias = args.get("alias").and_then(|v| v.as_str()).ok_or("alias is required")?;
+            // Resolve the alias FIRST so a bad alias fails loud before the
+            // interactive OAuth consent flow ever starts.
+            forge_sheet_sync::resolve_alias(alias).map_err(|e| e.to_string())?;
+            let client = forge_sheet_sync::oauth::OAuthClient::load().map_err(|e| e.to_string())?;
+            forge_sheet_sync::oauth::authorize(alias, &client).map_err(|e| e.to_string())?;
+            let out = serde_json::json!({ "authorized": true, "alias": alias });
+            serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
+        }
+    );
+
+    // sheet_pull — upsert open sheet rows into the forge task board.
+    register_tool!(server, "sheet_pull",
+        "Pull open rows from a mapped Google Sheet into the forge task board: creates a task for each new sheet row and updates existing tasks whose sheet row changed, per the alias's `.forge/sheets/<alias>.toml` mapping. Rows already in a terminal sheet status (per the mapping's terminal_status) are skipped. Set dry_run to preview created/updated/skipped counts without writing to the board or the sidecar state file. Requires a prior sheet_auth for this alias. Returns the PullReport JSON.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "alias":    {"type": "string",  "description": "Sheet alias (matches .forge/sheets/<alias>.toml)"},
+                "dry_run":  {"type": "boolean", "description": "Preview what pull would do without writing to the board or sidecar state. Default: false."},
+                "cql_host": {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"}
+            },
+            "required": ["alias"]
+        }),
+        |args| {
+            let alias = args.get("alias").and_then(|v| v.as_str()).ok_or("alias is required")?;
+            let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+            let cql_host = args.get("cql_host").and_then(|v| v.as_str());
+            // Resolve the alias FIRST so a bad alias fails loud before any
+            // OAuth/CQL/network call.
+            let (mapping, state_path) =
+                forge_sheet_sync::resolve_alias(alias).map_err(|e| e.to_string())?;
+            let client = forge_sheet_sync::oauth::OAuthClient::load().map_err(|e| e.to_string())?;
+            let token =
+                forge_sheet_sync::oauth::access_token(alias, &client).map_err(|e| e.to_string())?;
+            let sheets = forge_sheet_sync::sheets::google::GoogleSheets::new(token);
+            let mut board = forge_sheet_sync::board_exec::BoardExec::connect(cql_host)
+                .map_err(|e| e.to_string())?;
+            let report = forge_sheet_sync::pull(
+                &sheets,
+                &mut board,
+                &mapping,
+                &state_path,
+                &forge_sheet_sync::PullOptions { dry_run },
+            )
+            .map_err(|e| e.to_string())?;
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
+        }
+    );
+
+    // sheet_push — write a task's status/fix_ver/resolution_notes back to
+    // its mapped sheet row.
+    register_tool!(server, "sheet_push",
+        "Write a task's status/fix-version/resolution-notes back to its mapped Google Sheet row, per the alias's `.forge/sheets/<alias>.toml` mapping. Status writes are gated: only statuses in the mapping's dev_writable_status are ever written, and only when the row's current sheet status is not in terminal_status — the sheet owner's terminal call is never reopened from the dev side. fix_ver/notes have no such gate. Fields left unset are not written (never blanked). Set dry_run to preview the edits without writing to the sheet or the sidecar state file. Requires a prior sheet_auth for this alias. Returns the PushReport JSON.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "alias":    {"type": "string",  "description": "Sheet alias (matches .forge/sheets/<alias>.toml)"},
+                "row_id":   {"type": "string",  "description": "The sheet row's id (matches the mapping's id_column)"},
+                "status":   {"type": "string",  "description": "New status to write back (subject to the dev-writable/terminal gate)"},
+                "fix_ver":  {"type": "string",  "description": "New fix-version value to write back"},
+                "notes":    {"type": "string",  "description": "New resolution-notes value to write back"},
+                "dry_run":  {"type": "boolean", "description": "Preview the edits without writing to the sheet or sidecar state. Default: false."},
+                "cql_host": {"type": "string",  "description": "Accepted for symmetry with sheet_pull; unused — push never touches the board."}
+            },
+            "required": ["alias", "row_id"]
+        }),
+        |args| {
+            let alias = args.get("alias").and_then(|v| v.as_str()).ok_or("alias is required")?;
+            let row_id = args
+                .get("row_id")
+                .and_then(|v| v.as_str())
+                .ok_or("row_id is required")?
+                .to_string();
+            let status = args.get("status").and_then(|v| v.as_str()).map(str::to_string);
+            let fix_ver = args.get("fix_ver").and_then(|v| v.as_str()).map(str::to_string);
+            let notes = args.get("notes").and_then(|v| v.as_str()).map(str::to_string);
+            let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Resolve the alias FIRST so a bad alias fails loud before any
+            // OAuth/network call.
+            let (mapping, state_path) =
+                forge_sheet_sync::resolve_alias(alias).map_err(|e| e.to_string())?;
+            let client = forge_sheet_sync::oauth::OAuthClient::load().map_err(|e| e.to_string())?;
+            let token =
+                forge_sheet_sync::oauth::access_token(alias, &client).map_err(|e| e.to_string())?;
+            let sheets = forge_sheet_sync::sheets::google::GoogleSheets::new(token);
+            let req = forge_sheet_sync::push_plan::PushRequest {
+                row_id,
+                status,
+                fix_ver,
+                notes,
+            };
+            let report = forge_sheet_sync::push(
+                &sheets,
+                &mapping,
+                &state_path,
+                &req,
+                &forge_sheet_sync::PushOptions { dry_run },
+            )
+            .map_err(|e| e.to_string())?;
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
+        }
+    );
+
     // fmem_skill_ingest — seed/refresh the ferrosa-memory skill catalog from a
     // research/skills tree. Runs the full four-phase orchestrator (taxonomy →
     // ingest → re-pass → verify) and returns the JSON summary.
@@ -5205,6 +5378,10 @@ fn main() -> anyhow::Result<()> {
             handle_task(action, cli.pretty)?;
         }
 
+        Commands::Sheet { action } => {
+            handle_sheet(action, cli.pretty)?;
+        }
+
         Commands::FmemSkillIngest {
             root,
             filter,
@@ -5983,6 +6160,77 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             )?;
             let board = store.board()?;
             println!("{}", forge_shared::emit_json(&board, pretty)?);
+        }
+    }
+    Ok(())
+}
+
+fn handle_sheet(action: SheetAction, pretty: bool) -> anyhow::Result<()> {
+    match action {
+        SheetAction::Auth { alias } => {
+            // Resolve the alias FIRST so a bad alias fails loud before the
+            // interactive OAuth consent flow ever starts.
+            forge_sheet_sync::resolve_alias(&alias)?;
+            let client = forge_sheet_sync::oauth::OAuthClient::load()?;
+            forge_sheet_sync::oauth::authorize(&alias, &client)?;
+            let out = serde_json::json!({ "authorized": true, "alias": alias });
+            println!("{}", forge_shared::emit_json(&out, pretty)?);
+        }
+
+        SheetAction::Pull {
+            alias,
+            dry_run,
+            cql_host,
+        } => {
+            // Resolve the alias FIRST so a bad alias fails loud before any
+            // OAuth/CQL/network call.
+            let (mapping, state_path) = forge_sheet_sync::resolve_alias(&alias)?;
+            let client = forge_sheet_sync::oauth::OAuthClient::load()?;
+            let token = forge_sheet_sync::oauth::access_token(&alias, &client)?;
+            let sheets = forge_sheet_sync::sheets::google::GoogleSheets::new(token);
+            let mut board = forge_sheet_sync::board_exec::BoardExec::connect(cql_host.as_deref())?;
+            let report = forge_sheet_sync::pull(
+                &sheets,
+                &mut board,
+                &mapping,
+                &state_path,
+                &forge_sheet_sync::PullOptions { dry_run },
+            )?;
+            println!("{}", forge_shared::emit_json(&report, pretty)?);
+        }
+
+        SheetAction::Push {
+            alias,
+            row_id,
+            status,
+            fix_ver,
+            notes,
+            dry_run,
+            cql_host: _cql_host,
+        } => {
+            // Resolve the alias FIRST so a bad alias fails loud before any
+            // OAuth/network call. `--cql-host` is accepted here for
+            // symmetry with `pull` (and the `sheet_push` MCP tool), but
+            // `push` only writes back to the sheet — it never touches the
+            // board — so the value is intentionally unused.
+            let (mapping, state_path) = forge_sheet_sync::resolve_alias(&alias)?;
+            let client = forge_sheet_sync::oauth::OAuthClient::load()?;
+            let token = forge_sheet_sync::oauth::access_token(&alias, &client)?;
+            let sheets = forge_sheet_sync::sheets::google::GoogleSheets::new(token);
+            let req = forge_sheet_sync::push_plan::PushRequest {
+                row_id,
+                status,
+                fix_ver,
+                notes,
+            };
+            let report = forge_sheet_sync::push(
+                &sheets,
+                &mapping,
+                &state_path,
+                &req,
+                &forge_sheet_sync::PushOptions { dry_run },
+            )?;
+            println!("{}", forge_shared::emit_json(&report, pretty)?);
         }
     }
     Ok(())

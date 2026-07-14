@@ -132,6 +132,41 @@ fn locate_alias_path(start: &std::path::Path, alias: &str) -> Option<PathBuf> {
     None
 }
 
+/// Load the mapping for `alias` and the sidecar state path next to it.
+/// Fails loud if the alias's `.forge/sheets/<alias>.toml` is not found,
+/// naming both the alias and the path that was probed.
+///
+/// Thin wrapper around [`SheetMapping::alias_path`] (the cwd-walk) plus a
+/// private read + parse + state-path-derivation helper, split the same way
+/// [`SheetMapping::alias_path`]/`locate_alias_path` are — so the
+/// cwd-dependent walk and the pure-given-a-path logic can be tested
+/// independently.
+pub fn resolve_alias(alias: &str) -> anyhow::Result<(SheetMapping, PathBuf)> {
+    let path = SheetMapping::alias_path(alias);
+    resolve_alias_at(alias, &path)
+}
+
+/// Reads and parses the mapping at an already-resolved `path`, and derives
+/// the sidecar state path (`<alias>.state.toml`, next to `path`). Does not
+/// walk the filesystem looking for `path` — the caller (normally
+/// `resolve_alias`) is responsible for locating it. Split out so tests can
+/// exercise the read+parse+state_path behavior against a known path without
+/// depending on (or changing) the process's current working directory.
+fn resolve_alias_at(
+    alias: &str,
+    path: &std::path::Path,
+) -> anyhow::Result<(SheetMapping, PathBuf)> {
+    let body = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!(
+            "sheet mapping for alias '{alias}' not found at {}: {e}",
+            path.display()
+        )
+    })?;
+    let mapping = SheetMapping::from_toml_str(&body)?;
+    let state_path = path.with_file_name(format!("{alias}.state.toml"));
+    Ok((mapping, state_path))
+}
+
 impl SheetMapping {
     /// Parses and validates a `.forge/sheets/<alias>.toml` body.
     ///
@@ -354,5 +389,42 @@ id_column      = "Row ID"
         let result = locate_alias_path(&nested, "does-not-exist");
 
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_alias_at_reads_valid_mapping_and_derives_state_path() {
+        let tmpdir = tempfile::TempDir::new().expect("tempdir creation");
+        let sheets_dir = tmpdir.path().join(".forge").join("sheets");
+        std::fs::create_dir_all(&sheets_dir).expect("create .forge/sheets");
+        let config_path = sheets_dir.join("demo.toml");
+        std::fs::write(&config_path, VALID_TOML).expect("write config file");
+
+        let (mapping, state_path) =
+            resolve_alias_at("demo", &config_path).expect("valid alias should resolve");
+
+        assert_eq!(mapping.spreadsheet_id, "EXAMPLE_SPREADSHEET_ID");
+        assert_eq!(
+            state_path,
+            sheets_dir.join("demo.state.toml"),
+            "state path should sit next to the mapping file, named <alias>.state.toml"
+        );
+    }
+
+    #[test]
+    fn resolve_alias_at_missing_file_errs_naming_the_alias() {
+        let tmpdir = tempfile::TempDir::new().expect("tempdir creation");
+        let missing_path = tmpdir
+            .path()
+            .join(".forge")
+            .join("sheets")
+            .join("no-such-alias.toml");
+
+        let err = resolve_alias_at("no-such-alias", &missing_path)
+            .expect_err("missing alias file should fail loud");
+
+        assert!(
+            err.to_string().contains("no-such-alias"),
+            "error should name the alias, got: {err}"
+        );
     }
 }
