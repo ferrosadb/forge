@@ -6,6 +6,7 @@
 //! network-free building blocks used by every later stage of the sync
 //! engine (header mapping, board planning, push planning).
 
+pub mod board_plan;
 pub mod config;
 pub mod mapping;
 pub mod model;
