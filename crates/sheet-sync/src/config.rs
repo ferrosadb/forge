@@ -117,6 +117,21 @@ impl TryFrom<RawMapping> for SheetMapping {
     }
 }
 
+/// Walk up from `start` looking for `.forge/sheets/<alias>.toml`.
+/// Returns `Some(path)` if found, `None` otherwise. Pure; testable.
+fn locate_alias_path(start: &std::path::Path, alias: &str) -> Option<PathBuf> {
+    let relative = PathBuf::from(".forge")
+        .join("sheets")
+        .join(format!("{alias}.toml"));
+    for dir in start.ancestors() {
+        let candidate = dir.join(&relative);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 impl SheetMapping {
     /// Parses and validates a `.forge/sheets/<alias>.toml` body.
     ///
@@ -134,20 +149,16 @@ impl SheetMapping {
     /// Walks up from the current working directory looking for
     /// `.forge/sheets/<alias>.toml`, mirroring the ancestor-walk pattern in
     /// `crates/tasks/src/config.rs` (`read_config_cql_host`). Only builds/
-    /// locates the path — does not read or parse it.
+    /// locates the path — does not read or parse it. If not found, returns
+    /// the fallback path `.forge/sheets/<alias>.toml`.
     pub fn alias_path(alias: &str) -> PathBuf {
-        let relative = PathBuf::from(".forge")
+        let fallback = PathBuf::from(".forge")
             .join("sheets")
             .join(format!("{alias}.toml"));
-        if let Ok(cwd) = std::env::current_dir() {
-            for dir in cwd.ancestors() {
-                let candidate = dir.join(&relative);
-                if candidate.is_file() {
-                    return candidate;
-                }
-            }
-        }
-        relative
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| locate_alias_path(&cwd, alias))
+            .unwrap_or(fallback)
     }
 }
 
@@ -306,5 +317,42 @@ id_column      = "Row ID"
             err.to_string().contains("columns"),
             "error should mention columns, got: {err}"
         );
+    }
+
+    #[test]
+    fn locate_alias_path_finds_in_ancestor() {
+        let tmpdir = tempfile::TempDir::new().expect("tempdir creation");
+        let root = tmpdir.path();
+
+        // Create .forge/sheets/spoton-qa.toml in the root
+        let sheets_dir = root.join(".forge").join("sheets");
+        std::fs::create_dir_all(&sheets_dir).expect("create .forge/sheets");
+        let config_path = sheets_dir.join("spoton-qa.toml");
+        std::fs::write(&config_path, "test content").expect("write config file");
+
+        // Create nested subdirectory a/b
+        let nested = root.join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+
+        // Call locate_alias_path from the nested dir
+        let result =
+            locate_alias_path(&nested, "spoton-qa").expect("should find config in ancestor");
+
+        assert_eq!(result, config_path);
+    }
+
+    #[test]
+    fn locate_alias_path_returns_none_when_not_found() {
+        let tmpdir = tempfile::TempDir::new().expect("tempdir creation");
+        let root = tmpdir.path();
+
+        // Create nested subdirectory a/b but no .forge/sheets/does-not-exist.toml
+        let nested = root.join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+
+        // Call locate_alias_path for a non-existent alias
+        let result = locate_alias_path(&nested, "does-not-exist");
+
+        assert_eq!(result, None);
     }
 }

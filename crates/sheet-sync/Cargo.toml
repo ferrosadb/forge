@@ -10,3 +10,6 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 toml = { workspace = true }
 forge-tasks = { path = "../tasks" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
