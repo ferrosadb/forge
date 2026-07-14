@@ -8,13 +8,14 @@
 //! [`GoogleSheets::read_grid`]/[`GoogleSheets::write_cells`] are thin glue
 //! over those helpers plus `ureq`.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::model::{CellEdit, Grid};
 use crate::oauth::AccessToken;
-use crate::sheets::SheetsApi;
+use crate::sheets::{assert_edits_within_writable, SheetsApi};
 
 /// Root of the Sheets API v4 REST surface.
 const SHEETS_API_BASE: &str = "https://sheets.googleapis.com/v4/spreadsheets";
@@ -90,8 +91,14 @@ impl SheetsApi for GoogleSheets {
         &self,
         spreadsheet_id: &str,
         tab: &str,
+        allowed_headers: &BTreeSet<String>,
         edits: &[CellEdit],
     ) -> anyhow::Result<()> {
+        // Defense in depth, before any network call: re-assert the write
+        // blast radius even though `plan_push` already filtered to
+        // writable columns. See `SheetsApi::write_cells`'s doc.
+        assert_edits_within_writable(allowed_headers, edits)?;
+
         // Nothing to write: skip the HTTP call entirely rather than sending
         // a `data: []` batchUpdate the API would happily (and pointlessly)
         // accept.

@@ -29,6 +29,12 @@ pub(crate) struct FakeBoard {
     pub statuses: std::collections::HashMap<String, TaskStatus>,
     pub applied: Vec<(String, String)>,
     next_id: usize,
+    /// If `Some(n)`, the `n`-th call (1-indexed) to `apply` returns `Err`
+    /// instead of applying the op — simulates a board mutation failing
+    /// partway through a multi-row pull, so callers can assert what state
+    /// was (and wasn't) persisted before the failure.
+    fail_on_call: Option<usize>,
+    call_count: usize,
 }
 
 #[cfg(test)]
@@ -38,6 +44,17 @@ impl FakeBoard {
             statuses: std::collections::HashMap::new(),
             applied: Vec::new(),
             next_id: 0,
+            fail_on_call: None,
+            call_count: 0,
+        }
+    }
+
+    /// A [`FakeBoard`] whose `n`-th `apply` call (1-indexed) fails with
+    /// `Err`; every call before it succeeds normally.
+    pub(crate) fn new_failing_on_call(n: usize) -> Self {
+        Self {
+            fail_on_call: Some(n),
+            ..Self::new()
         }
     }
 
@@ -54,6 +71,13 @@ impl BoardSink for FakeBoard {
     }
 
     fn apply(&mut self, op: &BoardOp) -> anyhow::Result<Option<String>> {
+        self.call_count += 1;
+        if self.fail_on_call == Some(self.call_count) {
+            anyhow::bail!(
+                "FakeBoard: simulated apply failure on call {}",
+                self.call_count
+            );
+        }
         match op {
             BoardOp::Create {
                 row_id,

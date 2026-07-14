@@ -15,6 +15,37 @@ use crate::config::SheetMapping;
 use crate::model::{CanonicalField, CanonicalRow, Grid};
 use crate::normalize::{find_duplicate_ids, normalize_id};
 
+/// Fails loud, naming the offending header, if any header that is a key in
+/// `mapping.columns` (i.e. a header the sync engine actually reads/writes
+/// through) appears more than once in `grid.headers`. Headers *not* in the
+/// mapping may legitimately repeat on the sheet — this guard only cares
+/// about mapped ones.
+///
+/// Without this guard, [`map_grid`]'s `header_index` (a `HashMap`,
+/// last-match-wins) and [`crate::push_plan::plan_push`]'s column lookup
+/// (`.position()`, first-match-wins) would silently resolve a duplicated
+/// mapped header to *different* sheet columns — pull would read one column,
+/// push would write the other. Both callers invoke this at the top of their
+/// own function, before doing any header-index lookups, so pull and push
+/// fail loud identically instead of silently diverging.
+pub fn ensure_unique_mapped_headers(grid: &Grid, mapping: &SheetMapping) -> anyhow::Result<()> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for header in &grid.headers {
+        if mapping.columns.contains_key(header.as_str()) {
+            *counts.entry(header.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    if let Some((header, count)) = counts.into_iter().find(|(_, count)| *count > 1) {
+        anyhow::bail!(
+            "sheet mapping: mapped header {header:?} appears {count} times in grid headers {:?} — pull and push would resolve it to different columns",
+            grid.headers
+        );
+    }
+
+    Ok(())
+}
+
 /// The result of mapping a raw [`Grid`] through a [`SheetMapping`]: the
 /// surviving canonical rows, plus the ids that were excluded and why.
 ///
@@ -29,6 +60,12 @@ pub struct MappedGrid {
 }
 
 /// Maps `grid` to canonical rows using `mapping`.
+///
+/// Calls [`ensure_unique_mapped_headers`] first — fails loud, naming the
+/// header, if any mapped header appears more than once in `grid.headers`
+/// (shared with [`crate::push_plan::plan_push`] so pull and push fail the
+/// same way instead of silently resolving a duplicated header to different
+/// columns).
 ///
 /// Fails loud with `Err` naming the offending header if any key in
 /// `mapping.columns` is absent from `grid.headers` — a hard error, no
@@ -47,6 +84,8 @@ pub struct MappedGrid {
 /// Rows may be ragged (the Sheets API omits trailing empty cells): any
 /// cell index beyond a row's length is treated as `""`, never a panic.
 pub fn map_grid(grid: &Grid, mapping: &SheetMapping) -> anyhow::Result<MappedGrid> {
+    ensure_unique_mapped_headers(grid, mapping)?;
+
     let header_index: HashMap<&str, usize> = grid
         .headers
         .iter()
@@ -340,6 +379,70 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
         assert!(
             err.to_string().contains("Status"),
             "error should mention the missing header, got: {err}"
+        );
+    }
+
+    // -- ensure_unique_mapped_headers / map_grid duplicate-header guard -----
+
+    #[test]
+    fn ensure_unique_mapped_headers_errs_naming_a_duplicated_mapped_header() {
+        let mut headers = qa_headers();
+        let pos = headers
+            .iter()
+            .position(|h| h == "Status")
+            .expect("Status should be in qa_headers");
+        headers.insert(pos, "Status".to_string());
+        let grid = Grid {
+            headers,
+            rows: vec![],
+        };
+
+        let err = ensure_unique_mapped_headers(&grid, &qa_mapping())
+            .expect_err("a duplicated mapped header should fail loud");
+        assert!(
+            err.to_string().contains("Status"),
+            "error should mention the duplicated header, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_unique_mapped_headers_ok_when_only_an_unmapped_header_repeats() {
+        let mut headers = qa_headers();
+        // "Notes (internal)" is not a key in qa_mapping's `columns` — a
+        // repeat of it is not ambiguous for anything the sync engine reads
+        // or writes.
+        headers.push("Notes (internal)".to_string());
+        headers.push("Notes (internal)".to_string());
+        let grid = Grid {
+            headers,
+            rows: vec![],
+        };
+
+        ensure_unique_mapped_headers(&grid, &qa_mapping())
+            .expect("a duplicated unmapped header must not fail");
+    }
+
+    #[test]
+    fn map_grid_errs_naming_a_duplicated_mapped_header() {
+        let mut headers = qa_headers();
+        let pos = headers
+            .iter()
+            .position(|h| h == "Status")
+            .expect("Status should be in qa_headers");
+        headers.insert(pos, "Status".to_string());
+        let grid = Grid {
+            headers,
+            rows: vec![row(&[
+                "QA-001", "title", "Bug", "UI", "desc", "steps", "expected", "actual", "env",
+                "Medium", "P2", "No", "New", "New", "", "",
+            ])],
+        };
+
+        let err = map_grid(&grid, &qa_mapping())
+            .expect_err("map_grid must fail loud on a duplicated mapped header");
+        assert!(
+            err.to_string().contains("Status"),
+            "error should mention the duplicated header, got: {err}"
         );
     }
 

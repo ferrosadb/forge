@@ -67,8 +67,14 @@ pub struct PushReport {
 ///    created/updated/skipped from the op kinds.
 /// 4. `dry_run`: return the report as-is — **no** `board.apply` call, **no**
 ///    `state.save` call, so a dry-run pull is guaranteed side-effect-free.
-/// 5. Otherwise: apply every non-`Skip` op to `board`, `state.upsert` the
-///    corresponding entry, then persist `state` once at the end.
+/// 5. Otherwise: apply every non-`Skip` op to `board`, and **immediately**
+///    (before processing the next op) `state.upsert` + `state.save` the
+///    corresponding entry. This makes pull crash-safe under partial
+///    failure: if `board.apply` errors partway through the ops, every op
+///    that already succeeded is already durably recorded in
+///    `state_path` — a re-pull after the crash sees those rows as
+///    already-synced (`Skip`/`Update`, never a duplicate `Create`) and
+///    only retries the row that actually failed.
 ///
 /// Borrow-checker note: `plan_pull` takes `existing_status` as a `&dyn
 /// Fn(&str) -> Option<TaskStatus>`, which borrows `board` immutably inside
@@ -139,6 +145,10 @@ pub fn pull(
                         last_push_status: None,
                     },
                 );
+                // Persist immediately: if a later op's `board.apply` fails,
+                // this row must already be durably recorded so a re-pull
+                // doesn't re-`Create` it. See the doc comment above.
+                state.save(state_path)?;
             }
             BoardOp::Update {
                 row_id, task_id, ..
@@ -157,10 +167,11 @@ pub fn pull(
                         last_push_status: prior_push_status,
                     },
                 );
+                // Persist immediately — see the `Create` arm's comment above.
+                state.save(state_path)?;
             }
         }
     }
-    state.save(state_path)?;
 
     Ok(PullReport {
         created,
@@ -222,7 +233,23 @@ pub fn push(
         let wrote_status =
             status_header.is_some_and(|header| edits.iter().any(|edit| &edit.header == header));
 
-        sheets.write_cells(&mapping.spreadsheet_id, &mapping.tab, &edits)?;
+        // Defense in depth: re-derive the write blast-radius (the header
+        // set `plan_push` is allowed to emit) independently, and hand it to
+        // `write_cells` so the write boundary re-checks it itself rather
+        // than trusting `edits` came from a correctly-filtered plan.
+        let allowed_headers: std::collections::BTreeSet<String> = mapping
+            .columns
+            .iter()
+            .filter(|(_, field)| mapping.writable.contains(field))
+            .map(|(header, _)| header.clone())
+            .collect();
+
+        sheets.write_cells(
+            &mapping.spreadsheet_id,
+            &mapping.tab,
+            &allowed_headers,
+            &edits,
+        )?;
         if wrote_status {
             if let Some(entry) = state.rows.get_mut(&req.row_id) {
                 entry.last_push_status = req.status.clone();
@@ -448,6 +475,64 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
             assert!(entry.task_id.starts_with("t_"));
             assert!(!entry.content_hash.is_empty());
         }
+    }
+
+    // -- pull: crash-safety under partial apply failure --------------------
+
+    /// If `board.apply()` fails partway through the ops loop, rows already
+    /// applied before the failure must already be persisted to `state_path`
+    /// — otherwise a re-pull after the crash would re-`Create` them,
+    /// duplicating the board task. `pull_fixture_grid` yields two `Create`
+    /// ops in row order (QA-010, QA-011); `FakeBoard::new_failing_on_call(2)`
+    /// lets the first (QA-010) succeed and fails the second (QA-011).
+    #[test]
+    fn pull_partial_apply_failure_still_persists_completed_rows_state() {
+        let mapping = qa_mapping();
+        let sheets = FakeSheets::new(pull_fixture_grid());
+        let mut board = FakeBoard::new_failing_on_call(2);
+        let tmpdir = tempfile::tempdir().expect("tempdir creation");
+        let state_path = tmpdir
+            .path()
+            .join(".forge")
+            .join("sheets")
+            .join("qa.state.toml");
+
+        let err = pull(
+            &sheets,
+            &mut board,
+            &mapping,
+            &state_path,
+            &PullOptions { dry_run: false },
+        )
+        .expect_err("the second apply call should fail and propagate");
+        assert!(
+            err.to_string().contains("simulated apply failure"),
+            "unexpected error: {err}"
+        );
+
+        assert!(
+            state_path.is_file(),
+            "state for the first, already-applied row must be persisted despite the later failure"
+        );
+        let reloaded = State::load(&state_path).expect("reload should succeed");
+        assert_eq!(
+            reloaded.rows.len(),
+            1,
+            "only the first successfully-applied row should be in state, got {:?}",
+            reloaded.rows
+        );
+        let entry = reloaded
+            .rows
+            .get("QA-010")
+            .expect("QA-010 (first applied row) state entry should exist");
+        assert!(
+            entry.task_id.starts_with("t_"),
+            "task_id should be populated so a re-pull recognizes QA-010 as already synced: {entry:?}"
+        );
+        assert!(
+            !reloaded.rows.contains_key("QA-011"),
+            "QA-011 (the row whose apply failed) must not be in state — a re-pull should retry it"
+        );
     }
 
     // -- push fixtures ------------------------------------------------------

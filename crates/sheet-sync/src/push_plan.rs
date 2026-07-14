@@ -15,6 +15,12 @@
 //!
 //! ## Lifecycle handoff and blast radius (fail loud)
 //!
+//! 0. Any header that is a key in `mapping.columns` must appear at most
+//!    once in `grid.headers` — see
+//!    [`crate::mapping::ensure_unique_mapped_headers`], called first thing,
+//!    shared verbatim with [`crate::mapping::map_grid`] so a duplicated
+//!    mapped header can never make pull and push silently resolve to
+//!    different sheet columns.
 //! 1. `mapping.id_column` must be present in `grid.headers`, or `Err`.
 //! 2. A `row_id` that normalizes to an id shared by more than one row in
 //!    the grid (see [`crate::normalize::find_duplicate_ids`]) is ambiguous
@@ -64,6 +70,8 @@ pub fn plan_push(
     mapping: &SheetMapping,
     _state: &State,
 ) -> anyhow::Result<Vec<CellEdit>> {
+    crate::mapping::ensure_unique_mapped_headers(grid, mapping)?;
+
     let id_index = id_column_index(grid, mapping)?;
     let row_index = find_target_row(req, grid, id_index)?;
     let row = &grid.rows[row_index];
@@ -481,6 +489,58 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
         let edits = plan_push(&req, &grid, &mapping, &State::default())
             .expect("push with only a non-writable status field should not error");
         assert!(edits.is_empty());
+    }
+
+    // -- duplicated mapped header -> Err (shared guard with map_grid) -------
+
+    #[test]
+    fn duplicated_mapped_header_is_err_naming_it() {
+        let mapping = qa_mapping();
+        let mut headers = qa_headers();
+        let pos = headers
+            .iter()
+            .position(|h| h == "Status")
+            .expect("Status should be in qa_headers");
+        headers.insert(pos, "Status".to_string());
+        let grid = Grid {
+            headers,
+            rows: vec![qa_row("QA-001", "New")],
+        };
+        let req = PushRequest {
+            status: Some("In Progress".to_string()),
+            ..base_request("QA-001")
+        };
+
+        let err = plan_push(&req, &grid, &mapping, &State::default())
+            .expect_err("plan_push must fail loud on a duplicated mapped header");
+        assert!(
+            err.to_string().contains("Status"),
+            "error should mention the duplicated header, got: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicated_unmapped_header_does_not_prevent_push() {
+        let mapping = qa_mapping();
+        let mut headers = qa_headers();
+        headers.push("Notes (internal)".to_string());
+        headers.push("Notes (internal)".to_string());
+        let mut cells = qa_row("QA-008", "New");
+        cells.push(String::new());
+        cells.push(String::new());
+        let grid = Grid {
+            headers,
+            rows: vec![cells],
+        };
+        let req = PushRequest {
+            status: Some("In Progress".to_string()),
+            ..base_request("QA-008")
+        };
+
+        let edits = plan_push(&req, &grid, &mapping, &State::default())
+            .expect("a duplicated unmapped header must not block push");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].header, "Status");
     }
 
     // -- (f) duplicate ids -> Err --------------------------------------------
