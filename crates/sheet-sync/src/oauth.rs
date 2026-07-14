@@ -17,7 +17,7 @@
 //! surfaces.
 
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,6 +34,13 @@ const SHEETS_SCOPE: &str = "https://www.googleapis.com/auth/spreadsheets";
 /// Per-request timeout for token-endpoint calls, matching the pattern in
 /// `crates/ingest`/`crates/fmem-client`.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Upper bound, in bytes, on the loopback redirect's HTTP request line
+/// read in [`authorize`]. Generous for a real
+/// `GET /?code=...&state=... HTTP/1.1` line (which is at most a few
+/// hundred bytes even with long OAuth codes/state), while still capping
+/// growth if a local connection never sends a newline.
+const LOOPBACK_REQUEST_LINE_LIMIT: u64 = 8192;
 
 /// OAuth client identity and endpoints, loaded from a Google
 /// `client_secret.json`.
@@ -326,9 +333,17 @@ fn redact_token_fields(s: &str) -> String {
 
 /// One `ureq::Agent` config shared by the token-endpoint calls in this
 /// module, matching `crates/ingest`'s 30s-timeout pattern.
+///
+/// `http_status_as_error(false)` is essential here, not cosmetic: `ureq`
+/// v3 defaults to turning any 4xx/5xx into `Err(Error::StatusCode)` at
+/// `.send_form()` time, which would make the `status.is_success()`
+/// check (and the [`redact_token_fields`]-scrubbed `bail!`) in
+/// [`post_token_request`] unreachable dead code and throw away Google's
+/// `error_description` in favor of a bare status number.
 fn build_agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(HTTP_TIMEOUT))
+        .http_status_as_error(false)
         .build();
     ureq::Agent::new_with_config(config)
 }
@@ -402,14 +417,29 @@ pub fn token_cache_path(alias: &str) -> PathBuf {
 /// `tighten_permissions_best_effort` (duplicated locally since that
 /// helper is private to its module). Never fails the caller — a chmod
 /// failure on an unsupported filesystem is not a reason to lose a
-/// successful token save.
+/// successful token save. Unlike `state.json`, this file holds a live
+/// OAuth **refresh token**, so a swallowed chmod failure here is a
+/// swallowed secret-exposure risk — per the repo's fail-loud/disclosure
+/// rules, best-effort is fine but silent is not: each failure is logged
+/// to stderr (path + OS error only, never token text) so a permissive
+/// mode on a shared/multi-user machine is observable instead of hidden.
 #[cfg(unix)]
 fn tighten_permissions_best_effort(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!(
+            "warning: could not tighten permissions on {} (refresh token may be readable by other local users): {e}",
+            path.display()
+        );
+    }
     if let Some(parent) = path.parent() {
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)) {
+            eprintln!(
+                "warning: could not tighten permissions on {} (refresh token's directory may be accessible by other local users): {e}",
+                parent.display()
+            );
+        }
     }
 }
 
@@ -493,7 +523,14 @@ pub fn authorize(alias: &str, client: &OAuthClient) -> anyhow::Result<()> {
         anyhow::anyhow!("oauth: failed to accept loopback redirect connection: {e}")
     })?;
 
-    let mut reader = std::io::BufReader::new(&stream);
+    // Bounded via `.take(LOOPBACK_REQUEST_LINE_LIMIT)`: this is a
+    // request line from a local browser redirect, not untrusted network
+    // input, but nothing here guarantees a newline ever arrives (a
+    // malformed or truncated local payload), so an unbounded
+    // `read_line` could otherwise grow `request_line` without limit. A
+    // normal `GET /?code=...&state=... HTTP/1.1` line is well under the
+    // cap, so behavior for a real redirect is unchanged.
+    let mut reader = std::io::BufReader::new(&stream).take(LOOPBACK_REQUEST_LINE_LIMIT);
     let mut request_line = String::new();
     reader
         .read_line(&mut request_line)
@@ -730,6 +767,25 @@ mod tests {
         assert!(!redacted.contains("super-secret-value"));
         assert!(redacted.contains("REDACTED"));
         assert!(redacted.contains("kept"));
+    }
+
+    /// This is the shape [`post_token_request`] actually redacts once
+    /// `http_status_as_error(false)` lets a non-2xx response reach the
+    /// `status.is_success()` check instead of short-circuiting as a
+    /// `ureq::Error::StatusCode` at `.send_form()` — a realistic Google
+    /// `invalid_grant` error body (plus a fake leaked `access_token`
+    /// fragment appended, standing in for defense-in-depth against a
+    /// token Google's token endpoint isn't documented to echo back).
+    /// Asserts the secret is scrubbed while `error_description` — the
+    /// diagnostic text this whole fix exists to preserve — survives.
+    #[test]
+    fn redact_token_fields_preserves_error_description_but_scrubs_leaked_token() {
+        let body = r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked.","access_token":"ya29.SECRET"}"#;
+        let redacted = redact_token_fields(body);
+        assert!(!redacted.contains("ya29.SECRET"));
+        assert!(redacted.contains("REDACTED"));
+        assert!(redacted.contains("invalid_grant"));
+        assert!(redacted.contains("Token has been expired or revoked."));
     }
 
     #[test]

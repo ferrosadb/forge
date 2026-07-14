@@ -33,9 +33,17 @@ impl GoogleSheets {
         Self { token }
     }
 
+    /// `http_status_as_error(false)` is essential here, not cosmetic:
+    /// `ureq` v3 defaults to turning any 4xx/5xx into
+    /// `Err(Error::StatusCode)` at `.call()`/`.send_json()` time, which
+    /// would make the `status.is_success()` checks in
+    /// [`GoogleSheets::read_grid`]/[`GoogleSheets::write_cells`]
+    /// unreachable dead code and throw away the Sheets API's JSON error
+    /// body in favor of a bare status number.
     fn agent(&self) -> ureq::Agent {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(HTTP_TIMEOUT))
+            .http_status_as_error(false)
             .build();
         ureq::Agent::new_with_config(config)
     }
