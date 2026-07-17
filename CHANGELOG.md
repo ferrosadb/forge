@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Added
+- **MCP draft 2026-07-28 support.** Forge's MCP server now implements
+  `server/discover`, returns `resultType: "complete"` plus server `_meta`, adds
+  cache metadata and tool `outputSchema` contracts to `tools/list`, and exposes
+  an optional Streamable HTTP endpoint via
+  `frg --mcp-http --mcp-http-addr HOST:PORT`. The HTTP endpoint enforces
+  `MCP-Protocol-Version`, `Mcp-Method`, Base64-safe `Mcp-Name` for
+  `tools/call`, required modern `_meta` fields, Origin validation,
+  `405 Method Not Allowed` for legacy GET/DELETE endpoint traffic, and
+  rejection of client JSON-RPC response bodies.
+- **Modern ferrosa-memory HTTP client calls.** `forge-fmem-client` now sends
+  draft per-request `_meta` and matching HTTP headers to ferrosa-memory's
+  long-running HTTP MCP server, while the negotiation helper tries
+  `server/discover` before falling back to legacy `initialize`.
 - **Trusted web read/search tools.** Added `frg fetch-url` / MCP `fetch_url` for
   read-only page extraction through Forge's own HTTP path (no persistence, no
   third-party extraction provider, no auxiliary LLM), plus `frg web-search` /

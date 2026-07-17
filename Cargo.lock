@@ -866,6 +866,7 @@ name = "forge-mcp-server"
 version = "0.14.0"
 dependencies = [
  "anyhow",
+ "base64",
  "forge-checklist-state",
  "serde",
  "serde_json",

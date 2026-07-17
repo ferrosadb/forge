@@ -31,7 +31,7 @@ Add to `~/.claude/settings.json` to expose the MCP server:
   "mcpServers": {
     "forge": {
       "command": "/path/to/frg",
-      "args": ["run"]
+      "args": ["--mcp"]
     }
   }
 }
@@ -169,7 +169,11 @@ Each wrapper parses native output into structured JSON with error locations, war
 
 ## MCP tools
 
-The MCP server (activated by `frg run`) exposes the same functionality directly to Claude Code. Tools are split into two tiers:
+The MCP server exposes the same functionality directly to Claude Code. Use `frg --mcp` for stdio clients, or run `frg --mcp-http --mcp-http-addr 127.0.0.1:9977` to expose a Streamable HTTP endpoint at `POST /mcp`.
+
+Forge supports the draft `2026-07-28` MCP discovery/result shape: `server/discover`, `resultType: "complete"`, server identity in result `_meta`, `outputSchema` on advertised tools, and cache metadata on `tools/list`. The HTTP endpoint requires the draft mirror headers (`MCP-Protocol-Version`, `Mcp-Method`, and Base64-safe `Mcp-Name` for `tools/call`), validates `Origin`, returns `405` for legacy GET/DELETE MCP endpoint traffic, and rejects client JSON-RPC response objects.
+
+Tools are split into two tiers:
 
 **Tier 1 — always visible:** core analysis, log processing, code quality, architecture, ingestion, task management.
 
