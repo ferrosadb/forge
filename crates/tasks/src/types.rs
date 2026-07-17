@@ -102,7 +102,7 @@ pub struct Comment {
 // Request / Patch types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CreateTaskRequest {
     pub title: String,
     pub body: Option<String>,
@@ -117,7 +117,7 @@ pub struct CreateTaskRequest {
     pub parents: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct UpdateTaskPatch {
     pub status: Option<String>,
     pub assignee: Option<String>,

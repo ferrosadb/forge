@@ -50,6 +50,7 @@ forge-fail-loud-scan = { path = "../fail-loud-scan" }
 forge-schema-diff = { path = "../schema-diff" }
 forge-api-diff = { path = "../api-diff" }
 forge-tasks = { path = "../tasks" }
+forge-sheet-sync = { path = "../sheet-sync" }
 toml = { workspace = true }
 globset = "0.4"
 csv = "1"
