@@ -28,6 +28,9 @@ use serde_json::{json, Value};
 use ureq::tls::{RootCerts, TlsConfig};
 
 use crate::error::Error;
+use crate::protocol::{
+    add_client_meta, encode_mcp_header_value, params_name_for_mcp_header, MCP_PROTOCOL_VERSION,
+};
 use crate::transport::Transport;
 
 /// Default per-call timeout (5 minutes). Generous because a single
@@ -139,12 +142,25 @@ impl HttpTransport {
     /// Execute one request attempt. Connection-level failures surface as
     /// [`Error::Transport`] so [`Transport::call`] can retry them; HTTP-status
     /// and JSON-RPC errors are returned as-is and never retried.
-    fn call_once(&self, method: &str, id: u64, body: &Value) -> Result<Value, Error> {
+    fn call_once(
+        &self,
+        method: &str,
+        id: u64,
+        params: &Value,
+        body: &Value,
+    ) -> Result<Value, Error> {
         let mut req = self.agent.post(&self.mcp_url);
         if let Some(h) = &self.auth_header {
             req = req.header("Authorization", h);
         }
-        let req = req.header("Content-Type", "application/json");
+        let mut req = req
+            .header("Accept", "application/json, text/event-stream")
+            .header("Content-Type", "application/json")
+            .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
+            .header("Mcp-Method", method);
+        if let Some(name) = params_name_for_mcp_header(method, params) {
+            req = req.header("Mcp-Name", encode_mcp_header_value(name));
+        }
 
         let mut resp = req.send_json(body).map_err(|e| {
             Error::Transport(std::io::Error::other(format!(
@@ -218,14 +234,15 @@ impl Transport for HttpTransport {
         // retries since a transport failure means the server never produced a
         // response for it.
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let params = add_client_meta(params);
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": method,
-            "params": params,
+            "params": params.clone(),
         });
         retry_on_transport(MAX_CALL_ATTEMPTS, RETRY_BASE_BACKOFF, || {
-            self.call_once(method, id, &body)
+            self.call_once(method, id, &params, &body)
         })
     }
 }
@@ -261,6 +278,10 @@ where
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration as StdDuration;
 
     fn transport_err() -> Error {
         Error::Transport(std::io::Error::other("connection refused"))
@@ -335,6 +356,93 @@ mod tests {
     fn base_url_trailing_slash_normalised() {
         let t = HttpTransport::connect(HttpConfig::new("http://example.invalid:1/")).unwrap();
         assert_eq!(t.mcp_url, "http://example.invalid:1/mcp");
+    }
+
+    #[test]
+    fn http_call_sends_modern_accept_and_encoded_name_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut sent_request = false;
+            for _ in 0..MAX_CALL_ATTEMPTS {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_test_http_request(&mut stream);
+                if !sent_request {
+                    tx.send(request).unwrap();
+                    sent_request = true;
+                }
+                let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+                if sent_request {
+                    break;
+                }
+            }
+        });
+
+        let transport = HttpTransport::connect(HttpConfig {
+            base_url: format!("http://{addr}"),
+            auth: None,
+            timeout: Duration::from_secs(5),
+        })
+        .unwrap();
+        let result = transport
+            .call(
+                "tools/call",
+                json!({"name": "Hello, 世界", "arguments": {}}),
+            )
+            .unwrap();
+        assert_eq!(result, json!({"ok": true}));
+        let request = rx.recv_timeout(StdDuration::from_secs(2)).unwrap();
+        assert_eq!(
+            test_header_value(&request, "accept"),
+            Some("application/json, text/event-stream")
+        );
+        assert_eq!(
+            test_header_value(&request, "mcp-name"),
+            Some("=?base64?SGVsbG8sIOS4lueVjA==?=")
+        );
+    }
+
+    fn test_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+        request.lines().find_map(|line| {
+            let (header_name, value) = line.split_once(':')?;
+            header_name
+                .eq_ignore_ascii_case(name)
+                .then_some(value.trim())
+        })
+    }
+
+    fn read_test_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "connection closed before request completed");
+            buffer.extend_from_slice(&chunk[..read]);
+            let Some(header_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let header_text = String::from_utf8_lossy(&buffer[..header_end]);
+            let content_length = header_text
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if buffer.len().saturating_sub(header_end + 4) >= content_length {
+                return String::from_utf8_lossy(&buffer).to_string();
+            }
+        }
     }
 
     #[test]

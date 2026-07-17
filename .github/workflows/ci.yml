@@ -49,6 +49,13 @@ jobs:
           cargo test -p forge-checklist-state
           cargo test -p forge --test checklist
           cargo test -p forge-mcp-server
+      - name: MCP draft conformance tests
+        run: |
+          cargo test -p forge-mcp-server --lib stdio_server_discover
+          cargo test -p forge-mcp-server --lib http_
+          cargo test -p forge-fmem-client --lib protocol::tests::encode_mcp_header_value
+          cargo test -p forge-fmem-client --lib transport::http::tests::http_call_sends_modern_accept_and_encoded_name_headers
+          cargo test -p forge-fmem-client --lib tools::handshake
       - name: Test workspace
         run: cargo test --workspace
       - name: Build release CLI smoke
