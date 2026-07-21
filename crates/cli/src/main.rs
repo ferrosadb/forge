@@ -515,6 +515,22 @@ enum Commands {
         kinds: Option<String>,
     },
 
+    /// Probe a live MCP draft HTTP endpoint for the documented supported subset
+    McpProbe {
+        /// MCP HTTP endpoint, including the /mcp path
+        #[arg(long)]
+        endpoint: String,
+        /// HTTP Basic auth username (requires --password)
+        #[arg(long)]
+        user: Option<String>,
+        /// HTTP Basic auth password (requires --user)
+        #[arg(long)]
+        password: Option<String>,
+        /// Request timeout in milliseconds
+        #[arg(long, default_value_t = 15_000)]
+        timeout_ms: u64,
+    },
+
     /// Scan for leaked API keys, credentials, and private keys
     SecretScan {
         /// Directory to scan (defaults to current dir)
@@ -3496,6 +3512,37 @@ fn run_mcp_server() -> anyhow::Result<()> {
         }
     );
 
+    // mcp_probe — black-box draft HTTP capability probe
+    register_tool!(server, "mcp_probe",
+        "Probe a live MCP draft HTTP endpoint for Ferrosa Memory's documented supported subset. Calls server/discover with draft headers and request metadata, then reports pass, fail, or unsupported checks for the advertised protocol version, server identity, methods, and task-resource SSE subscription semantics. This is not a full MCP draft conformance certification.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "endpoint": {"type": "string", "description": "MCP HTTP endpoint including /mcp"},
+                "user": {"type": "string", "description": "HTTP Basic auth username; requires password"},
+                "password": {"type": "string", "description": "HTTP Basic auth password; requires user"},
+                "timeout_ms": {"type": "integer", "minimum": 1, "description": "Request timeout in milliseconds (default: 15000)"}
+            },
+            "required": ["endpoint"]
+        }),
+        |args| {
+            let endpoint = args.get("endpoint").and_then(|value| value.as_str()).ok_or("endpoint is required")?;
+            let user = args.get("user").and_then(|value| value.as_str());
+            let password = args.get("password").and_then(|value| value.as_str());
+            let basic_auth = match (user, password) {
+                (Some(user), Some(pass)) => Some(forge_mcp_probe::BasicAuth { user: user.to_string(), pass: pass.to_string() }),
+                (None, None) => None,
+                _ => return Err("user and password must be provided together".to_string()),
+            };
+            let mut config = forge_mcp_probe::ProbeConfig::new(endpoint);
+            config.basic_auth = basic_auth;
+            if let Some(timeout_ms) = args.get("timeout_ms").and_then(|value| value.as_u64()) {
+                config.timeout = std::time::Duration::from_millis(timeout_ms);
+            }
+            serde_json::to_string_pretty(&forge_mcp_probe::probe(&config)).map_err(|error| error.to_string())
+        }
+    );
+
     // secret_scan — scan for leaked API keys, credentials, private keys
     register_path_tool!(server, "secret_scan",
         "Scan a directory for leaked API keys, AWS/GCP credentials, GitHub/Slack/Stripe tokens, JWTs, private key headers, and password assignments. Use before committing config changes, during secure-review, or as part of pipeline-defense. Returns masked snippets (never full plaintext) with severity per finding. Respects .gitignore, skips binary files. Prefer this over hand-rolled grep patterns.",
@@ -5600,6 +5647,28 @@ fn main() -> anyhow::Result<()> {
             };
             let report = forge_todo_extract::extract(&path, &opts)?;
             println!("{}", forge_shared::emit_json(&report, cli.pretty)?);
+        }
+
+        Commands::McpProbe {
+            endpoint,
+            user,
+            password,
+            timeout_ms,
+        } => {
+            let basic_auth = match (user, password) {
+                (Some(user), Some(pass)) => Some(forge_mcp_probe::BasicAuth { user, pass }),
+                (None, None) => None,
+                _ => anyhow::bail!("--user and --password must be provided together"),
+            };
+            let mut config = forge_mcp_probe::ProbeConfig::new(endpoint);
+            config.basic_auth = basic_auth;
+            config.timeout = std::time::Duration::from_millis(timeout_ms);
+            let report = forge_mcp_probe::probe(&config);
+            let passed = report.overall == forge_mcp_probe::ProbeStatus::Pass;
+            println!("{}", forge_shared::emit_json(&report, cli.pretty)?);
+            if !passed {
+                std::process::exit(1);
+            }
         }
 
         Commands::SecretScan { path } => {
