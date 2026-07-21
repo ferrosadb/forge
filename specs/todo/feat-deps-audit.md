@@ -1,5 +1,8 @@
 # Feat: deps_audit — Dependency lockfile audit for CVEs and suspicious versions
 
+> Status: Implemented. This is the original planning record; use
+> `frg deps-audit --help` and the README for the current interface.
+
 **Priority:** Medium
 **Component:** new crate `forge-deps-audit`, CLI subcommand `deps-audit`, MCP tool `deps_audit`
 

@@ -1,5 +1,9 @@
 # Forge Glob with Stats
 
+> Status: Implemented. The unchecked verification checklist below is the
+> original planning checklist, not an assertion that the feature is pending.
+> Use `frg glob --help` and the code/tests as the current interface reference.
+
 ## Problem
 
 `frg digest` and `frg module_outline` both require a file path or directory, but they return **code structure**, not **what files exist**. Agents need to know which files are in a directory before they can call `excerpt`, `module_outline`, or `Read` on them.

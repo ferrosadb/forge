@@ -1,5 +1,9 @@
 # Forge Glob with Stats
 
+> Status: Implemented. This duplicate is retained only for historical workflow
+> traceability; see `../implemented/feat-glob-stats.md` and `frg glob --help`
+> for the shipped interface.
+
 ## Problem
 
 `frg digest` and `frg module_outline` both require a file path or directory, but they return **code structure**, not **what files exist**. Agents need to know which files are in a directory before they can call `excerpt`, `module_outline`, or `Read` on them.

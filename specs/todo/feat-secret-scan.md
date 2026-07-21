@@ -1,5 +1,8 @@
 # Feat: secret_scan — Scan for API keys, credentials, private keys
 
+> Status: Implemented. This is the original planning record; use
+> `frg secret-scan --help` and the README for the current interface.
+
 **Priority:** High
 **Component:** new crate `forge-secret-scan`, CLI subcommand `secret-scan`, MCP tool `secret_scan`
 

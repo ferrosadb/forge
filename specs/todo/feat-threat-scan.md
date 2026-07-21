@@ -1,5 +1,8 @@
 # Feat: threat_scan — Pattern scan for STRIDE attack vectors
 
+> Status: Implemented. This is the original planning record; use
+> `frg threat-scan --help` and the README for the current interface.
+
 **Priority:** High
 **Component:** new crate `forge-threat-scan`, CLI subcommand `threat-scan`, MCP tool `threat_scan`
 

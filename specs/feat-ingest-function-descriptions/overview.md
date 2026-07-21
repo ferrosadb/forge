@@ -1,12 +1,14 @@
 # feat-ingest-function-descriptions — Overview
 
-> Status: Blueprint
-> Source spec: `../todo/feat-ingest-function-descriptions.md`
-> Parent pipeline: extends `fmem-skill-ingest` (in-process)
+> Status: Implemented as the standalone `frg ingest-descriptions` command
+> Historical source spec: `../todo/feat-ingest-function-descriptions.md`
+> The code and `frg ingest-descriptions --help` are the current interface reference.
 
 ## Purpose
 
-Add a description-extraction pass to `frg ingest` that stores 1–2 sentence descriptions of public code entities as temporal facts in ferrosa-memory. This lets `hybrid_search` answer "what does X do?" without reading source files.
+Add a description-extraction pass exposed as `frg ingest-descriptions` that
+stores concise descriptions of public code entities in ferrosa-memory. This
+lets `hybrid_search` answer "what does X do?" without reading source files.
 
 ## Value
 

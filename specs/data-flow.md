@@ -1,7 +1,7 @@
 # Forge Data Flow
 
-> Last updated: 2026-04-07
-> Status: Draft
+> Last updated: 2026-07-21
+> Status: Current runtime reference
 
 ## Primary Runtime Flows
 
@@ -27,16 +27,34 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Client
-    participant CLI as frg --mcp
+    participant CLI as frg --mcp / --mcp-http
     participant Detect as project-detect
     participant Server as mcp-server
 
-    Client->>CLI: initialize
+    Client->>CLI: server/discover or initialize
     CLI->>Detect: detect current project stack
     CLI->>Server: set detected stacks
     Client->>Server: tools/list
-    Server-->>Client: tier-1 + matching tier-2 tools
+    Server-->>Client: visible tools with input/output schemas and result metadata
 ```
+
+### Streamable HTTP MCP Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant HTTP as POST /mcp
+    participant Server as mcp-server
+    Client->>HTTP: JSON-RPC request + MCP metadata and mirrored headers
+    HTTP->>HTTP: enforce body cap, method, Origin, and header/body agreement
+    HTTP->>Server: validated request
+    Server-->>HTTP: structured MCP result or JSON-RPC error
+    HTTP-->>Client: JSON response
+```
+
+`GET` and `DELETE` at `/mcp` deliberately return `405 Method Not Allowed`.
+The HTTP endpoint is for modern MCP clients that can supply the required draft
+metadata; stdio remains the simplest client configuration.
 
 ### Proxy and Hook Flow
 
@@ -84,13 +102,13 @@ sequenceDiagram
     Note over CLI,Fmem: Phase A — taxonomy seed
     loop per PARENT_TAG edge in plan
         CLI->>Client: ensure_parent_tag(child, parent)
-        Client->>Fmem: JSON-RPC tools/call
+        Client->>Fmem: JSON-RPC tools/call over stdio or HTTP
     end
 
     Note over CLI,Fmem: Phase B — skill ingest (fmem auto-creates tags)
     loop per skill
         CLI->>Client: ingest_skill(args + content_hash)
-        Client->>Fmem: JSON-RPC tools/call
+        Client->>Fmem: JSON-RPC tools/call over stdio or HTTP
         Fmem-->>Client: Created / Updated / Skipped
     end
 
@@ -107,8 +125,8 @@ sequenceDiagram
 ```
 
 See `specs/fmem-skill-ingest/` for the full blueprint of
-this flow; `ensure_parent_tag` and `verify_skill` wrappers land once
-`../../../ferrosa-memory/specs/todo/skill-ingest-support.md` ships.
+this flow; its external skill-ingestion operations remain gated on matching
+ferrosa-memory support.
 
 ## Important Data Paths
 
@@ -134,6 +152,7 @@ this flow; `ensure_parent_tag` and `verify_skill` wrappers land once
 Architecture updates should verify these still match the code:
 
 - MCP tool tiering is enforced in `crates/mcp-server`
+- stdio and HTTP MCP dispatch share the same server and tool handlers
 - `crates/cli` remains the only orchestration entrypoint
 - ingestion still supports code, web, and paper modes
 - hook flow still delegates through the canonical hook command

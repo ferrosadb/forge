@@ -1,8 +1,8 @@
 # feat-glob-stats — Overview
 
-> Status: Blueprint
-> Source spec: `../todo/feat-glob-stats.md`
-> Pipeline: `todo/` (moves to `in-process/` on sprint pickup)
+> Status: Implemented
+> Historical source spec: `../todo/feat-glob-stats.md`
+> The code and `frg glob --help` are the current interface reference.
 
 ## Purpose
 

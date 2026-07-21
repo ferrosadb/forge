@@ -1,8 +1,8 @@
 # forge (frg)
 
-Token-saving tools for Claude Code. A single binary (`frg`) with structured-JSON subcommands and a matching MCP server, so Claude Code reads compact machine-readable output instead of raw terminal noise.
+Token-saving tools for coding agents. A single binary (`frg`) with structured-JSON subcommands and an MCP server, so agents can consume compact, machine-readable output instead of raw terminal noise. Forge also includes a Claude Code hook integration and a Goose workflow skill.
 
-**Current version:** 0.13.5
+**Current version:** 0.14.0
 
 [![CI](https://github.com/ferrosadb/forge/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrosadb/forge/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -20,8 +20,7 @@ Raw `cargo`, `go test`, `pytest`, and `git diff` output is verbose and token-exp
 ```sh
 git clone https://github.com/ferrosadb/forge.git
 cd forge
-cargo build --release
-cp target/release/frg ~/.cargo/bin/frg    # or wherever is on your PATH
+cargo install --path crates/cli --locked
 ```
 
 Add to `~/.claude/settings.json` to expose the MCP server:
@@ -40,14 +39,22 @@ Add to `~/.claude/settings.json` to expose the MCP server:
 Install Claude Code hooks (pre-tool-call output filtering):
 
 ```sh
-frg init --install
+frg init --global
 ```
+
+Use `frg init --show` to inspect the installed hook and `frg init --global --uninstall`
+to remove it. The Goose integration is a repository-local skill at
+[`integrations/goose/forge`](integrations/goose/forge). Configure that directory
+through the Goose host's normal extension or skill-discovery settings.
 
 ---
 
 ## CLI reference
 
-All commands write JSON to stdout unless noted. Pass output through `frg hook` in hooks to filter before Claude reads it.
+Commands that produce structured reports write JSON to stdout unless noted;
+commands with an explicit text format, such as `glob --format brief`, are the
+exception. Pass output through `frg hook` in hooks to filter before Claude
+reads it.
 
 ### Log and text processing
 
@@ -57,14 +64,14 @@ All commands write JSON to stdout unless noted. Pass output through `frg hook` i
 | `frg log-distill [--context N]` | Extract errors and warnings from verbose build logs with surrounding context lines |
 | `frg diff-filter` | Filter git diffs: collapse large hunks, skip noise files (lockfiles, generated), summarize binary changes |
 | `frg lint-dedup` | Deduplicate lint warnings by rule ID; group by file for compact review |
-| `frg log-monitor [--interval N]` | Detect log stalls, OOM signals, disk pressure, and repeated error patterns in a running log stream |
+| `frg log-monitor [--stall-threshold N] [--repeat-threshold N] [--max-events N]` | Detect log stalls, OOM signals, disk pressure, and repeated error patterns in a log stream |
 | `frg mermaid-validate` | Validate Mermaid diagram syntax from stdin |
 
 ### Code quality and analysis
 
 | Command | Description |
 |---------|-------------|
-| `frg coverage-gate [--baseline N]` | Validate test coverage meets baseline; enforces complexity-coverage coupling (high-CC code requires higher coverage) |
+| `frg coverage-gate --coverage <lcov.info> --source <dir> [--baseline N]` | Validate test coverage meets a baseline; enforces complexity-coverage coupling (high-CC code requires higher coverage) |
 | `frg smell-detect [paths...]` | Find code smells: long functions, high cyclomatic complexity, deep nesting |
 | `frg doc-coverage [paths...]` | Check public API documentation coverage; report undocumented exports |
 | `frg threat-scan [paths...]` | Scan for STRIDE attack patterns (spoofing, tampering, repudiation, info disclosure, DoS, elevation) |
@@ -94,7 +101,7 @@ All commands write JSON to stdout unless noted. Pass output through `frg hook` i
 | `frg excerpt <target> [--context N]` | Extract a single named symbol with surrounding context lines |
 | `frg lookup <symbol> [dir]` | Find symbol definitions across the project |
 | `frg outline <file>` | Extract function signatures, type definitions, and module structure from a single file |
-| `frg glob <pattern> [dir]` | Find files matching a glob pattern; returns per-file size, line count, and symbol summary |
+| `frg glob <pattern> [--format brief\|json\|csv\|table]` | Find files matching a glob pattern; returns bounded per-file path, size, line count, modification time, and generated-file metadata |
 | `frg project-detect [dir]` | Auto-detect project type, languages, frameworks, and applicable forge tools |
 | `frg format-fix [dir] [--check]` | Auto-detect language and run the appropriate formatter; `--check` for CI |
 
@@ -105,7 +112,7 @@ These commands ingest structured knowledge into ferrosa-memory via the `agent_me
 | Command | Description |
 |---------|-------------|
 | `frg ingest [dir]` | Ingest codebase structure: modules, functions, types, and their relationships as typed entities and edges |
-| `frg ingest-descriptions [file]` | LLM-backed one-line descriptions for public entities; uses a local Ollama model; validates ≤60 words, rejects prompt-leak strings |
+| `frg ingest-descriptions [dir]` | LLM-backed one-line descriptions for public entities; supports a configured provider and validates ≤60 words while rejecting prompt-leak strings |
 | `frg ingest-url <url>` | Fetch a web page and ingest its structure and concepts as entities |
 | `frg fetch-url <url>` | Fetch a web page through Forge's trusted HTTP path and return compact read-only text, sections, and links without persistence |
 | `frg web-search <query>` | Search for candidate URLs through an explicitly configured trusted SearXNG backend (`FORGE_WEB_SEARCH_URL` or `SEARXNG_URL`) |
@@ -136,8 +143,8 @@ scrubbed text. No LLM summarizer is invoked in the search path.
 | `frg task unlink <src> <dst> <type>` | Remove a task link |
 | `frg task comment <id> <body>` | Add a comment to a task |
 | `frg task board` | Render the kanban board grouped by status |
-| `frg checklist <action>` | Persistent workflow checklists with DAG dependencies |
-| `frg fmem-skill-ingest [dir]` | Ingest the SKILL.md catalog into ferrosa-memory as typed skill entities |
+| `frg checklist <action>` | Persistent workflow checklists with dependencies, leases, attempts, waiting gates, reviews, and scoring |
+| `frg fmem-skill-ingest [--root <dir>]` | Ingest the SKILL.md catalog into ferrosa-memory as typed skill entities |
 
 ### Google Sheets sync
 
@@ -170,8 +177,10 @@ Each wrapper parses native output into structured JSON with error locations, war
 | `frg analytics [--json]` | Detailed filter analytics per tool |
 | `frg clear-analytics` | Reset analytics counters |
 | `frg discover [dir]` | Scan project and suggest forge optimization opportunities |
-| `frg init --install\|--uninstall` | Install or remove the Claude Code pre-tool-call hook |
+| `frg init --global [--uninstall\|--show]` | Install, remove, or inspect the Claude Code hook configuration |
 | `frg hook` | Process tool output as a Claude Code hook (reads tool name + output from env) |
+| `frg context [--session ID] [--clear]` | Show or clear tracked files and symbols for an agent session |
+| `frg context-check [dir]` | Report available ferrosa-memory context for a project |
 | `frg tool-aliases [--format FORMAT]` | Return the alias map for tool name mismatches between callers and forge |
 | `frg version` | Print installed frg version |
 
@@ -179,7 +188,7 @@ Each wrapper parses native output into structured JSON with error locations, war
 
 ## MCP tools
 
-The MCP server exposes the same functionality directly to Claude Code. Use `frg --mcp` for stdio clients, or run `frg --mcp-http --mcp-http-addr 127.0.0.1:9977` to expose a Streamable HTTP endpoint at `POST /mcp`.
+The MCP server exposes Forge's agent-facing functionality directly to MCP clients. Use `frg --mcp` for stdio clients, or run `frg --mcp-http --mcp-http-addr 127.0.0.1:9977` to expose a Streamable HTTP endpoint at `POST /mcp`.
 
 Forge supports the draft `2026-07-28` MCP discovery/result shape: `server/discover`, `resultType: "complete"`, server identity in result `_meta`, `outputSchema` on advertised tools, and cache metadata on `tools/list`. The HTTP endpoint requires the draft mirror headers (`MCP-Protocol-Version`, `Mcp-Method`, and Base64-safe `Mcp-Name` for `tools/call`), validates `Origin`, returns `405` for legacy GET/DELETE MCP endpoint traffic, and rejects client JSON-RPC response objects.
 
@@ -199,6 +208,8 @@ Tools are split into two tiers:
 | `digest` | `frg digest` |
 | `excerpt` | `frg excerpt` |
 | `glob` | `frg glob` |
+| `smell_detect` | `frg smell-detect` |
+| `format_fix` | `frg format-fix` |
 | `git_summary` | git status / log / diff (structured) |
 | `list` | list all available forge tools |
 | `tool_aliases` | `frg tool-aliases` |
@@ -233,11 +244,14 @@ Tools are split into two tiers:
 | `ingest_corpus` | `frg ingest-corpus` |
 | `task_create` | `frg task create` |
 | `task_update` | `frg task update` |
+| `task_get` / `task_list` | `frg task get` / `frg task list` |
+| `task_link` / `task_unlink` / `task_comment` | `frg task link` / `frg task unlink` / `frg task comment` |
 | `task_board` | `frg task board` |
 | `sheet_auth` | `frg sheet auth` |
 | `sheet_pull` | `frg sheet pull` |
 | `sheet_push` | `frg sheet push` |
 | `cargo` (tier 2) | `frg run cargo` |
+| `clippy` (tier 2) | `frg run cargo clippy` |
 | `go_tools` (tier 2) | `frg run go` |
 | `dotnet` (tier 2) | `frg run dotnet` |
 | `npm_tools` (tier 2) | `frg run npm` |
@@ -413,12 +427,15 @@ docs/           Extended documentation
 git clone https://github.com/ferrosadb/forge.git
 cd forge
 cargo fmt --all
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo build --release
+cargo build --workspace --all-targets
 ```
 
-CI (`forge.yml`) runs: format check, clippy, build, test. All commands must be run from the repository root — the workspace root for this crate tree.
+Before opening a PR or release, use `cargo fmt --all -- --check` rather than
+the mutating formatter command above. CI ([`ci.yml`](.github/workflows/ci.yml))
+runs format checking, clippy, build, and tests. All commands must be run from
+the repository root — the workspace root for this crate tree.
 
 ## Contributing
 

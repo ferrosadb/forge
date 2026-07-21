@@ -1,0 +1,5 @@
+{
+  "name": "forge",
+  "version": "0.1.0",
+  "description": "Forge workflow guidance for goose: checklist-driven, bounded, token-efficient development using small work packets and explicit verification gates."
+}
