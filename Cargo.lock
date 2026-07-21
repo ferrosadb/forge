@@ -596,6 +596,7 @@ dependencies = [
  "forge-log-distill",
  "forge-log-monitor",
  "forge-materialization-scan",
+ "forge-mcp-probe",
  "forge-mcp-server",
  "forge-merge-check",
  "forge-mermaid-validate",
@@ -860,6 +861,18 @@ dependencies = [
  "ignore",
  "regex",
  "serde",
+]
+
+[[package]]
+name = "forge-mcp-probe"
+version = "0.15.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
 ]
 
 [[package]]

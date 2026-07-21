@@ -36,6 +36,7 @@ forge-concurrency-scan = { path = "../concurrency-scan" }
 forge-outline = { path = "../outline" }
 forge-dep-tree = { path = "../dep-tree" }
 forge-mcp-server = { path = "../mcp-server" }
+forge-mcp-probe = { path = "../mcp-probe" }
 forge-format-fix = { path = "../format-fix" }
 forge-merge-check = { path = "../merge-check" }
 forge-devtools = { path = "../devtools" }

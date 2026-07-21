@@ -17,6 +17,7 @@ members = [
     "crates/concurrency-scan",
     "crates/fail-loud-scan",
     "crates/mcp-server",
+    "crates/mcp-probe",
     "crates/dep-tree",
     "crates/outline",
     "crates/format-fix",
