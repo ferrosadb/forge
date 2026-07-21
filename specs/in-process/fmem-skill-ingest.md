@@ -1,6 +1,6 @@
 # feat: `frg fmem-skill-ingest` — seed ferrosa-memory skill catalog from `../research/skills`
 
-**Status:** todo
+**Status:** implemented in Forge; end-to-end verification remains externally gated by compatible ferrosa-memory support
 **Consumer:** ferrosa-memory (see `../../../../ferrosa-memory/specs/skills-layer-design.md`)
 **Created:** 2026-04-16
 

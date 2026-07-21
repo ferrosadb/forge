@@ -1,15 +1,18 @@
 # fmem-skill-ingest Blueprint — Overview
 
-> Status: in-process (blueprint locked, ready for dispatch)
+> Status: CLI and MCP surface implemented; end-to-end verification remains externally gated by compatible ferrosa-memory support
 > Created: 2026-04-16
 > Updated: 2026-04-16 (spec added taxonomy seed + per-skill tag resolution)
 > Locked: 2026-04-16 (post-fmem-Sprint-2 — open questions resolved, scope finalized)
-> Feature spec: `../todo/fmem-skill-ingest.md`
+> Historical status record: `../in-process/fmem-skill-ingest.md`
 > Consumer: `ferrosa-memory/specs/skills-layer-design.md`
 
 ## Feature summary
 
-Add `frg fmem-skill-ingest` — a new forge subcommand that walks `research/skills/**/SKILL.md` (≈78 files across `task-level/`, `tech/`, `quality/`, etc.) and ingests each skill into ferrosa-memory via its `ingest_skill` MCP tool. Idempotent via SHA-256 `content_hash`; re-runnable after every skill edit.
+`frg fmem-skill-ingest` walks a `SKILL.md` catalog and ingests each skill into
+ferrosa-memory via its `ingest_skill` MCP tool. The command supports
+idempotent content-hash behavior, filtering, dry runs, and explicit server
+selection; its live behavior is defined by CLI help and the implementation.
 
 ## Why it matters
 

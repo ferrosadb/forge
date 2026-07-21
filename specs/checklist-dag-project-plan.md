@@ -17,14 +17,14 @@ immediate_next_actions:
 
 # Project Plan: Forge Dependency-Aware Checklists + compile-project DAG Output
 
-> Last updated: 2026-04-27
-> Status: draft
+> Last updated: 2026-07-21
+> Status: Historical plan — the core dependency-aware checklist surface shipped; compile-project catalog integration remains outside this repository's verified scope
 > Source: /project-management
 > Scope: `the Forge repository` plus `$FORGE_SKILL_CATALOG_DIRtask-level/compile-project`
 
 ## Executive Summary
 
-Forge already has persistent flat checklist state in `crates/checklist-state`, and `compile-project` already describes a RALPH dependency DAG in markdown. This project adds optional dependency metadata and scheduler primitives to Forge checklists, then updates `compile-project` so every compiled plan also writes an executable `.forge/checklists/<plan>.json` DAG checklist that agents can drain safely and in parallel where possible.
+Forge started with persistent flat checklist state in `crates/checklist-state`, while `compile-project` described a RALPH dependency DAG in Markdown. The Forge portion of this plan—dependency metadata and scheduler primitives—has shipped. The compile-project catalog work remains a separate integration concern and should not be inferred from this historical plan alone.
 
 ## Current State
 

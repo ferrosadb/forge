@@ -1,5 +1,8 @@
 # Feat: mermaid_validate — Lint Mermaid diagrams before writing
 
+> Status: Implemented. This is the original planning record; use
+> `frg mermaid-validate --help` and the README for the current interface.
+
 **Priority:** Medium
 **Component:** new crate `forge-mermaid-validate`, CLI subcommand `mermaid-validate`, MCP tool `mermaid_validate`
 

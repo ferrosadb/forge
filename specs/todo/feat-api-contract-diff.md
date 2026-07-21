@@ -1,5 +1,8 @@
 # Feat: api_contract_diff — Detect breaking API changes between two revisions
 
+> Status: Implemented. This is the original planning record; use `frg api-diff`
+> help and the README for the current interface.
+
 **Priority:** High
 **Component:** new crate `forge-api-diff`, CLI subcommand `api-diff`, MCP tool `api_contract_diff`
 

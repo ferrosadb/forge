@@ -1,5 +1,8 @@
 # Feat: todo_extract — Structured TODO/FIXME/HACK inventory
 
+> Status: Implemented. This is the original planning record; use
+> `frg todo-extract --help` and the README for the current interface.
+
 **Priority:** Medium
 **Component:** new crate `forge-todo-extract`, CLI subcommand `todo-extract`, MCP tool `todo_extract`
 

@@ -24,8 +24,8 @@ immediate_next_actions:
 
 # Forge Anti-Loop Attempt Control
 
-> Last updated: 2026-07-12
-> Status: review
+> Last updated: 2026-07-21
+> Status: Core checklist-state behavior implemented in v0.14.0; external Ferrosa and hook-enforcement follow-ons remain design work
 > Scope: `tools/forge`, Ferrosa/fmem integration, `continue-until-done`, `tdd`, and `whats-next`
 
 ## Purpose
@@ -43,11 +43,13 @@ The design uses two guards:
 
 ## Current implementation evidence
 
-- `forge-checklist-state` currently supports `pending`, `in_progress`,
-  `completed`, and `blocked` item states.
-- Checklist schema v2 has dependency metadata, ready calculation, claims, and
-  leases, but no typed gate, review record, attempt model, goal reference, or
-  priority score.
+- `forge-checklist-state` supports dependency-aware checklists, claims and
+  leases, bounded attempts, typed waiting gates, structured reviews, resolution,
+  and scored-ready work.
+- The CLI and MCP `checklist_state` surface supports the corresponding v3
+  operations while retaining legacy checklist reads and status updates.
+- The remaining Ferrosa event-storage, independent semantic judge, and
+  agent-scoped enforcement-hook portions are not represented as shipped here.
 - Notes are one free-text string and cannot safely drive state transitions.
 - CLI and MCP handlers are concentrated in `crates/cli/src/main.rs`, the primary
   Forge churn and bug-fix hotspot. New behavior should remain in

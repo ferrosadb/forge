@@ -1,5 +1,8 @@
 # Feat: schema_diff — Compare SQL/CQL/graph schemas for breaking migrations
 
+> Status: Implemented. This is the original planning record; use
+> `frg schema-diff --help` and the README for the current interface.
+
 **Priority:** High
 **Component:** new crate `forge-schema-diff`, CLI subcommand `schema-diff`, MCP tool `schema_diff`
 

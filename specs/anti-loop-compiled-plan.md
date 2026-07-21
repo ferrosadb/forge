@@ -9,7 +9,7 @@ executive_summary: >
 # Compiled Implementation Plan: Forge Anti-Loop Control
 
 > Generated: 2026-07-12
-> Status: ready
+> Status: Historical plan — core checklist-state packets shipped in v0.14.0; external integration packets remain follow-on work
 > Execution policy: one mutating worker in this worktree (`serial_code`)
 > Source: [Forge anti-loop attempt control](anti-loop-attempt-control.md)
 

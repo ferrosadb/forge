@@ -1,5 +1,10 @@
 # Feat: checklist_state — Persistent workflow checklist store
 
+> Status: Implemented. This file is retained in `todo/` as the original v1
+> feature record; the shipped schema has since advanced through dependency-aware
+> v2 and anti-loop v3 behavior. See the current CLI help and
+> `anti-loop-attempt-control.md` for the live surface.
+
 **Priority:** Medium
 **Component:** new crate `forge-checklist-state`, CLI subcommand `checklist`, MCP tool `checklist_state`
 
@@ -46,6 +51,10 @@
 
 ## CLI subcommands
 
+The original v1 commands remain supported. The shipped surface also includes
+`create-dag`, `validate`, `ready`, `claim`, `release`, `attempt-start`,
+`attempt-finish`, `wait`, `review`, `resolve`, and `score`.
+
 - `frg checklist create <name> --items item1,item2,item3` — initialize a new checklist
 - `frg checklist list` — list all checklists in `.forge/checklists/`
 - `frg checklist show <name>` — pretty-print a checklist
@@ -55,7 +64,11 @@
 
 ## MCP tool
 
-Single MCP tool `checklist_state` with a mode parameter: `create | list | show | set | note | delete`. Claude calls it to save or resume workflow state between turns.
+Single MCP tool `checklist_state` with a mode parameter. The original modes
+`create | list | show | set | note | delete` remain supported; the shipped
+contract also supports dependency, lease, attempt, gate, review, resolution,
+and scoring modes. MCP clients should inspect `tools/list` for its current
+input schema instead of relying on this historical v1 list.
 
 ## Output
 
