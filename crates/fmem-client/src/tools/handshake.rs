@@ -1,24 +1,17 @@
-//! MCP `initialize` handshake.
+//! MCP protocol negotiation.
 //!
-//! P3 — before any `tools/call`, the client must call `initialize` and
-//! announce its protocol version. The server replies with its own
-//! protocolVersion + server info. We assert the protocol version
-//! matches a known-supported set; anything else fails loud with an
-//! upgrade hint (FMEA F15).
+//! Draft MCP uses stateless `server/discover`; legacy fmem servers still use
+//! `initialize`. Forge probes discovery first and falls back to initialize only
+//! when the server does not implement the modern method.
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::error::Error;
+use crate::protocol::{
+    client_meta, LEGACY_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
+};
 use crate::transport::Transport;
-
-/// Protocol version forge expects. Mirrors what fmem advertises today
-/// (`ferrosa-memory-mcp:dispatch.rs:962`). Update in lockstep with fmem.
-pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
-
-/// Acceptable protocol versions — for now a single value, but kept as
-/// a slice so we can widen compatibility without rewriting.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[MCP_PROTOCOL_VERSION];
 
 /// Whether the handshake allows a protocol-version mismatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +32,14 @@ pub struct InitializeInfo {
     pub server_info: Option<ServerInfo>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DiscoverInfo {
+    #[serde(rename = "supportedVersions", default)]
+    supported_versions: Vec<String>,
+    #[serde(rename = "_meta", default)]
+    meta: Value,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ServerInfo {
     #[serde(default)]
@@ -49,16 +50,73 @@ pub struct ServerInfo {
 
 /// Perform the MCP initialize handshake.
 ///
-/// Forge identifies itself as `forge-fmem-client` with its crate
-/// version. On a version mismatch under [`ExpectedProtocolVersion::Strict`]
-/// the call fails with [`Error::Protocol`] carrying both the advertised
-/// and expected versions so the operator can see what to upgrade.
+/// Modern servers answer `server/discover`; legacy servers that return
+/// `Method not found` are retried with `initialize`. On a version mismatch
+/// under [`ExpectedProtocolVersion::Strict`] the call fails with
+/// [`Error::Protocol`] carrying both advertised and expected versions.
 pub fn initialize<T: Transport>(
     transport: &T,
     mode: ExpectedProtocolVersion,
 ) -> Result<InitializeInfo, Error> {
+    match discover(transport, mode) {
+        Ok(info) => {
+            validate_version(&info.protocol_version, mode)?;
+            return Ok(info);
+        }
+        Err(Error::Tool { code: -32601, .. }) => {}
+        Err(error) => return Err(error),
+    }
+
+    legacy_initialize(transport, mode)
+}
+
+fn discover<T: Transport>(
+    transport: &T,
+    mode: ExpectedProtocolVersion,
+) -> Result<InitializeInfo, Error> {
+    let raw = transport.call(
+        "server/discover",
+        json!({
+            "_meta": client_meta()
+        }),
+    )?;
+    let info: DiscoverInfo = serde_json::from_value(raw)
+        .map_err(|e| Error::Protocol(format!("server/discover response parse error: {e}")))?;
+    let selected = info
+        .supported_versions
+        .iter()
+        .find(|version| version.as_str() == MCP_PROTOCOL_VERSION)
+        .or_else(|| {
+            info.supported_versions
+                .iter()
+                .find(|version| version.as_str() == LEGACY_PROTOCOL_VERSION)
+        })
+        .or_else(|| {
+            if mode == ExpectedProtocolVersion::Permissive {
+                info.supported_versions.first()
+            } else {
+                None
+            }
+        })
+        .cloned()
+        .ok_or_else(|| {
+            Error::Protocol(format!(
+                "MCP protocol mismatch: server supports {:?}, client supports {:?}. Update forge-fmem-client or fmem.",
+                info.supported_versions, SUPPORTED_PROTOCOL_VERSIONS
+            ))
+        })?;
+    Ok(InitializeInfo {
+        protocol_version: selected,
+        server_info: parse_server_info_from_meta(&info.meta),
+    })
+}
+
+fn legacy_initialize<T: Transport>(
+    transport: &T,
+    mode: ExpectedProtocolVersion,
+) -> Result<InitializeInfo, Error> {
     let params = json!({
-        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "protocolVersion": LEGACY_PROTOCOL_VERSION,
         "capabilities": { "tools": {} },
         "clientInfo": {
             "name": "forge-fmem-client",
@@ -69,16 +127,27 @@ pub fn initialize<T: Transport>(
     let info: InitializeInfo = serde_json::from_value(raw)
         .map_err(|e| Error::Protocol(format!("initialize response parse error: {e}")))?;
 
-    if mode == ExpectedProtocolVersion::Strict
-        && !SUPPORTED_PROTOCOL_VERSIONS.contains(&info.protocol_version.as_str())
-    {
+    validate_version(&info.protocol_version, mode)?;
+    Ok(info)
+}
+
+fn validate_version(version: &str, mode: ExpectedProtocolVersion) -> Result<(), Error> {
+    if mode == ExpectedProtocolVersion::Strict && !SUPPORTED_PROTOCOL_VERSIONS.contains(&version) {
         return Err(Error::Protocol(format!(
             "MCP protocol mismatch: server advertises `{}`, client supports {:?}. Update forge-fmem-client or fmem.",
-            info.protocol_version, SUPPORTED_PROTOCOL_VERSIONS
+            version, SUPPORTED_PROTOCOL_VERSIONS
         )));
     }
+    Ok(())
+}
 
-    Ok(info)
+fn parse_server_info_from_meta(meta: &Value) -> Option<ServerInfo> {
+    serde_json::from_value(
+        meta.get("io.modelcontextprotocol/serverInfo")
+            .cloned()
+            .unwrap_or(Value::Null),
+    )
+    .ok()
 }
 
 #[cfg(test)]
@@ -91,10 +160,16 @@ mod tests {
     fn strict_mode_accepts_supported_version() {
         let m = MockTransport::new();
         m.expect_call(
-            "initialize",
+            "server/discover",
             ScriptedResponse::Ok(json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "serverInfo": { "name": "ferrosa-memory-mcp", "version": "0.1.0" },
+                "resultType": "complete",
+                "supportedVersions": [MCP_PROTOCOL_VERSION],
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": "ferrosa-memory-mcp",
+                        "version": "0.1.0"
+                    }
+                }
             })),
         );
         let info = initialize(&m, ExpectedProtocolVersion::Strict).unwrap();
@@ -106,9 +181,10 @@ mod tests {
     fn strict_mode_rejects_unknown_version() {
         let m = MockTransport::new();
         m.expect_call(
-            "initialize",
+            "server/discover",
             ScriptedResponse::Ok(json!({
-                "protocolVersion": "9999-99-99",
+                "resultType": "complete",
+                "supportedVersions": ["9999-99-99"],
             })),
         );
         let err = initialize(&m, ExpectedProtocolVersion::Strict).unwrap_err();
@@ -125,8 +201,11 @@ mod tests {
     fn permissive_mode_accepts_any_version() {
         let m = MockTransport::new();
         m.expect_call(
-            "initialize",
-            ScriptedResponse::Ok(json!({ "protocolVersion": "9999-99-99" })),
+            "server/discover",
+            ScriptedResponse::Ok(json!({
+                "resultType": "complete",
+                "supportedVersions": ["9999-99-99"],
+            })),
         );
         let info = initialize(&m, ExpectedProtocolVersion::Permissive).unwrap();
         assert_eq!(info.protocol_version, "9999-99-99");
@@ -136,7 +215,7 @@ mod tests {
     fn malformed_response_is_protocol_error() {
         let m = MockTransport::new();
         m.expect_call(
-            "initialize",
+            "server/discover",
             ScriptedResponse::Ok(json!({ "wrong": "shape" })),
         );
         let err = initialize(&m, ExpectedProtocolVersion::Strict).unwrap_err();
@@ -144,17 +223,47 @@ mod tests {
     }
 
     #[test]
-    fn sends_expected_init_params() {
+    fn sends_expected_discover_params() {
         let m = MockTransport::new();
+        m.expect_call_with(
+            "server/discover",
+            |p| {
+                p["_meta"]["io.modelcontextprotocol/protocolVersion"] == MCP_PROTOCOL_VERSION
+                    && p["_meta"]["io.modelcontextprotocol/clientInfo"]["name"]
+                        == "forge-fmem-client"
+            },
+            ScriptedResponse::Ok(json!({
+                "supportedVersions": [MCP_PROTOCOL_VERSION],
+            })),
+        );
+        initialize(&m, ExpectedProtocolVersion::Strict).unwrap();
+        m.assert_done();
+    }
+
+    #[test]
+    fn falls_back_to_legacy_initialize_when_discover_is_missing() {
+        let m = MockTransport::new();
+        m.expect_call(
+            "server/discover",
+            ScriptedResponse::RawError(Error::Tool {
+                code: -32601,
+                message: "Method not found".into(),
+            }),
+        );
         m.expect_call_with(
             "initialize",
             |p| {
-                p["protocolVersion"] == MCP_PROTOCOL_VERSION
+                p["protocolVersion"] == LEGACY_PROTOCOL_VERSION
                     && p["clientInfo"]["name"] == "forge-fmem-client"
             },
-            ScriptedResponse::Ok(json!({ "protocolVersion": MCP_PROTOCOL_VERSION })),
+            ScriptedResponse::Ok(json!({
+                "protocolVersion": LEGACY_PROTOCOL_VERSION,
+                "serverInfo": { "name": "legacy-fmem", "version": "0.1.0" },
+            })),
         );
-        initialize(&m, ExpectedProtocolVersion::Strict).unwrap();
+        let info = initialize(&m, ExpectedProtocolVersion::Strict).unwrap();
+        assert_eq!(info.protocol_version, LEGACY_PROTOCOL_VERSION);
+        assert_eq!(info.server_info.unwrap().name, "legacy-fmem");
         m.assert_done();
     }
 }

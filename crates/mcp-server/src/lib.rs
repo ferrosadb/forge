@@ -1,17 +1,19 @@
 //! Module: Serve Forge tools over MCP and adapt structured checklist operations.
 //! Correctness: Correct when tool schemas match handlers and checklist records remain structured end to end.
-//! Last revised: 2026-07-12
-//! Last changed: Added the shared T-005 checklist schema, handler, and recovery context.
+//! Last revised: 2026-07-17
+//! Last changed: Tightened MCP draft 2026-07-28 HTTP Origin, metadata, and mirrored-header validation.
 
 use std::collections::VecDeque;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use base64::Engine as _;
+use serde::{ser::SerializeStruct, Deserialize, Serialize};
 use serde_json::{json, Value};
 
 fn debug_log(msg: &str) {
@@ -20,24 +22,60 @@ fn debug_log(msg: &str) {
     }
 }
 
+pub const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
+pub const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+pub const HEADER_MISMATCH: i32 = -32020;
+pub const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
+const MODERN_RESULT_TTL_MS: u64 = 300_000;
+const MODERN_CACHE_SCOPE: &str = "private";
+const MAX_HTTP_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
 /// An MCP tool definition sent in `tools/list` responses.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolDef {
     pub name: String,
     pub description: String,
-    #[serde(rename = "inputSchema")]
     pub input_schema: Value,
     /// Tier for progressive disclosure: 1=always visible, 2=stack-detected, 3=on-demand.
     /// Not serialized in the MCP wire format. Defaults to 1 (always visible).
-    #[serde(skip, default)]
     pub tier: u8,
     /// Optional annotations for tool behavior
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<ToolAnnotations>,
+}
+
+impl Serialize for ToolDef {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let field_count = if self.annotations.is_some() { 5 } else { 4 };
+        let mut tool = serializer.serialize_struct("ToolDef", field_count)?;
+        tool.serialize_field("name", &self.name)?;
+        tool.serialize_field("description", &self.description)?;
+        tool.serialize_field("inputSchema", &self.input_schema)?;
+        tool.serialize_field("outputSchema", &tool_output_schema())?;
+        if let Some(annotations) = &self.annotations {
+            tool.serialize_field("annotations", annotations)?;
+        }
+        tool.end()
+    }
+}
+
+fn tool_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "result": {
+                "description": "Forge tool result payload; JSON when the handler returned JSON, otherwise a string fallback."
+            }
+        },
+        "required": ["result"],
+        "additionalProperties": false
+    })
 }
 
 /// Define the checklist MCP contract in the transport crate so the CLI server
@@ -456,7 +494,8 @@ enum ReaderEvent {
 // Server
 // ---------------------------------------------------------------------------
 
-/// A JSON-RPC 2.0 MCP stdio server.
+/// A JSON-RPC 2.0 MCP stdio/HTTP server.
+#[derive(Clone)]
 pub struct McpServer {
     tools: Vec<ToolRegistration>,
     server_name: String,
@@ -606,6 +645,34 @@ impl McpServer {
         Ok(())
     }
 
+    /// Run the same MCP server over a minimal Streamable HTTP endpoint.
+    ///
+    /// The HTTP surface is intentionally narrow: `POST /mcp` for JSON-RPC and
+    /// `GET /healthz` for process health. Each accepted connection handles one
+    /// request and closes, so request bodies stay bounded and there is no hidden
+    /// per-connection protocol state.
+    pub fn run_http(self, bind_addr: &str) -> Result<()> {
+        let listener = TcpListener::bind(bind_addr)?;
+        eprintln!("[mcp-server] HTTP listening on http://{bind_addr}/mcp");
+        let server = Arc::new(self);
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let server = Arc::clone(&server);
+                    thread::spawn(move || {
+                        if let Err(error) = handle_http_connection(server, stream) {
+                            eprintln!("[mcp-server] HTTP connection error: {error}");
+                        }
+                    });
+                }
+                Err(error) => eprintln!("[mcp-server] HTTP accept error: {error}"),
+            }
+        }
+
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Internal dispatch
     // -----------------------------------------------------------------------
@@ -618,11 +685,39 @@ impl McpServer {
 
     fn handle_request(&self, id: Value, method: &str, params: &Value) -> Value {
         match method {
+            "server/discover" => match validate_modern_stdio_request(Some(&id), params) {
+                Ok(()) => self.respond_server_discover(id),
+                Err(error) => json_error_with_data(id, error.code, &error.message, error.data),
+            },
             "initialize" => self.respond_initialize(id),
+            "tools/list" if body_protocol_version(params).is_some() => {
+                match validate_modern_stdio_request(Some(&id), params) {
+                    Ok(()) => self.respond_tools_list(id),
+                    Err(error) => json_error_with_data(id, error.code, &error.message, error.data),
+                }
+            }
             "tools/list" => self.respond_tools_list(id),
+            "tools/call" if body_protocol_version(params).is_some() => {
+                match validate_modern_stdio_request(Some(&id), params) {
+                    Ok(()) => self.respond_tools_call(id, params),
+                    Err(error) => json_error_with_data(id, error.code, &error.message, error.data),
+                }
+            }
             "tools/call" => self.respond_tools_call(id, params),
             _ => {
                 eprintln!("[mcp-server] unknown method: {method}");
+                json_error(id, -32601, "Method not found")
+            }
+        }
+    }
+
+    fn handle_modern_request(&self, id: Value, method: &str, params: &Value) -> Value {
+        match method {
+            "server/discover" => self.respond_server_discover(id),
+            "tools/list" => self.respond_tools_list(id),
+            "tools/call" => self.respond_tools_call(id, params),
+            _ => {
+                eprintln!("[mcp-server] unknown modern method: {method}");
                 json_error(id, -32601, "Method not found")
             }
         }
@@ -650,6 +745,7 @@ impl McpServer {
                     .unwrap_or_default(),
             )
             .cloned();
+        let server_info = self.server_identity();
         let (result_tx, result_rx) = mpsc::channel();
 
         thread::spawn(move || {
@@ -666,7 +762,7 @@ impl McpServer {
                         json_error(id, -32601, &format!("Tool not found: {name}"))
                     }
                 }
-                Some(reg) => respond_tool_call(id, &reg, &params),
+                Some(reg) => respond_tool_call(id, &reg, &params, server_info),
             };
             let _ = result_tx.send(response);
         });
@@ -695,19 +791,48 @@ impl McpServer {
         }
     }
 
+    fn server_identity(&self) -> Value {
+        json!({
+            "name": self.server_name,
+            "version": self.server_version
+        })
+    }
+
+    fn server_capabilities(&self) -> Value {
+        json!({
+            "tools": {"listChanged": false}
+        })
+    }
+
+    fn modern_meta(&self) -> Value {
+        json!({
+            "io.modelcontextprotocol/serverInfo": self.server_identity()
+        })
+    }
+
+    fn respond_server_discover(&self, id: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "resultType": "complete",
+                "supportedVersions": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
+                "capabilities": self.server_capabilities(),
+                "_meta": self.modern_meta(),
+                "ttlMs": MODERN_RESULT_TTL_MS,
+                "cacheScope": MODERN_CACHE_SCOPE
+            }
+        })
+    }
+
     fn respond_initialize(&self, id: Value) -> Value {
         json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {"listChanged": false}
-                },
-                "serverInfo": {
-                    "name": self.server_name,
-                    "version": self.server_version
-                }
+                "protocolVersion": LEGACY_PROTOCOL_VERSION,
+                "capabilities": self.server_capabilities(),
+                "serverInfo": self.server_identity()
             }
         })
     }
@@ -718,7 +843,11 @@ impl McpServer {
             "jsonrpc": "2.0",
             "id": id,
             "result": {
-                "tools": defs
+                "resultType": "complete",
+                "tools": defs,
+                "_meta": self.modern_meta(),
+                "ttlMs": MODERN_RESULT_TTL_MS,
+                "cacheScope": MODERN_CACHE_SCOPE
             }
         })
     }
@@ -733,13 +862,562 @@ impl McpServer {
 
         match self.tool_registration(name) {
             None => json_error(id, -32601, &format!("Tool not found: {name}")),
-            Some(reg) => respond_tool_call(id, reg, params),
+            Some(reg) => respond_tool_call(id, reg, params, self.server_identity()),
         }
     }
 
     fn tool_registration(&self, name: &str) -> Option<&ToolRegistration> {
         self.tools.iter().find(|r| r.def.name == name)
     }
+}
+
+struct ParsedHttpRequest {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+struct ModernHttpValidationError {
+    code: i32,
+    message: String,
+    data: Option<Value>,
+}
+
+impl ModernHttpValidationError {
+    fn header_mismatch(message: impl Into<String>) -> Self {
+        Self {
+            code: HEADER_MISMATCH,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    fn unsupported_version(requested: impl Into<String>) -> Self {
+        let requested = requested.into();
+        Self {
+            code: UNSUPPORTED_PROTOCOL_VERSION,
+            message: format!("Unsupported MCP protocol version: {requested}"),
+            data: Some(json!({
+                "requested": requested,
+                "supported": [MODERN_PROTOCOL_VERSION]
+            })),
+        }
+    }
+
+    fn invalid_params(message: impl Into<String>) -> Self {
+        Self {
+            code: -32602,
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
+fn handle_http_connection(server: Arc<McpServer>, mut stream: TcpStream) -> io::Result<()> {
+    let response = match read_http_request(&mut stream) {
+        Ok(request) => handle_http_request(&server, request),
+        Err(error) => http_text_response("400 Bad Request", &format!("bad request: {error}")),
+    };
+    stream.write_all(response.as_bytes())?;
+    stream.flush()
+}
+
+fn handle_http_request(server: &McpServer, request: ParsedHttpRequest) -> String {
+    if let Err(message) = validate_origin(&request.headers) {
+        return json_rpc_error_response("403 Forbidden", None, -32600, message, None);
+    }
+
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/health") | ("GET", "/healthz") => http_text_response("200 OK", "ok"),
+        ("GET" | "DELETE", "/mcp") => http_empty_response("405 Method Not Allowed"),
+        ("POST", "/mcp") => handle_http_mcp_request(server, &request.headers, &request.body),
+        _ => http_empty_response("404 Not Found"),
+    }
+}
+
+fn handle_http_mcp_request(server: &McpServer, headers: &[(String, String)], body: &str) -> String {
+    let rpc: Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(error) => {
+            return json_rpc_error_response(
+                "400 Bad Request",
+                None,
+                -32700,
+                format!("Parse error: {error}"),
+                None,
+            );
+        }
+    };
+
+    let id = rpc.get("id").cloned();
+    let method = rpc.get("method").and_then(Value::as_str);
+    let is_client_response =
+        method.is_none() && (rpc.get("result").is_some() || rpc.get("error").is_some());
+    if is_client_response {
+        return json_rpc_error_response(
+            "400 Bad Request",
+            None,
+            -32600,
+            "Invalid Request: clients MUST NOT send JSON-RPC responses over Streamable HTTP",
+            None,
+        );
+    }
+    if let (None, Some(method)) = (id.as_ref(), method) {
+        let params = rpc.get("params").cloned().unwrap_or(Value::Null);
+        if let Err(error) = validate_modern_http_request(headers, method, &params, None) {
+            return json_rpc_error_response(
+                "400 Bad Request",
+                None,
+                error.code,
+                error.message,
+                error.data,
+            );
+        }
+        return http_empty_response("202 Accepted");
+    }
+
+    let Some(method) = method else {
+        return json_rpc_error_response(
+            "400 Bad Request",
+            id,
+            -32600,
+            "Invalid Request: missing method",
+            None,
+        );
+    };
+    let params = rpc.get("params").cloned().unwrap_or(Value::Null);
+
+    if let Err(error) = validate_modern_http_request(headers, method, &params, id.as_ref()) {
+        return json_rpc_error_response(
+            "400 Bad Request",
+            id,
+            error.code,
+            error.message,
+            error.data,
+        );
+    }
+
+    let response = server.handle_modern_request(id.unwrap_or(Value::Null), method, &params);
+    let status = if response
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_i64)
+        == Some(-32601)
+    {
+        "404 Not Found"
+    } else {
+        "200 OK"
+    };
+    http_json_response(status, &response)
+}
+
+fn validate_modern_http_request(
+    headers: &[(String, String)],
+    method: &str,
+    params: &Value,
+    id: Option<&Value>,
+) -> std::result::Result<(), ModernHttpValidationError> {
+    let header_version = header_value(headers, "MCP-Protocol-Version").ok_or_else(|| {
+        ModernHttpValidationError::header_mismatch("missing MCP-Protocol-Version header")
+    })?;
+    validate_plain_header_value(header_version).map_err(|message| {
+        ModernHttpValidationError::header_mismatch(format!(
+            "invalid MCP-Protocol-Version header: {message}"
+        ))
+    })?;
+    let body_version = body_protocol_version(params).ok_or_else(|| {
+        ModernHttpValidationError::invalid_params(
+            "missing params._meta.io.modelcontextprotocol/protocolVersion",
+        )
+    })?;
+    if header_version != body_version {
+        return Err(ModernHttpValidationError::header_mismatch(format!(
+            "MCP-Protocol-Version header ({header_version}) does not match request _meta protocolVersion ({body_version})"
+        )));
+    }
+    if header_version != MODERN_PROTOCOL_VERSION {
+        return Err(ModernHttpValidationError::unsupported_version(
+            header_version.to_string(),
+        ));
+    }
+
+    let header_method = header_value(headers, "Mcp-Method")
+        .ok_or_else(|| ModernHttpValidationError::header_mismatch("missing Mcp-Method header"))?;
+    validate_plain_header_value(header_method).map_err(|message| {
+        ModernHttpValidationError::header_mismatch(format!("invalid Mcp-Method header: {message}"))
+    })?;
+    if header_method != method {
+        return Err(ModernHttpValidationError::header_mismatch(format!(
+            "Mcp-Method header ({header_method}) does not match JSON-RPC method ({method})"
+        )));
+    }
+
+    let meta = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            ModernHttpValidationError::invalid_params("params._meta must be an object")
+        })?;
+    if !meta
+        .get("io.modelcontextprotocol/clientCapabilities")
+        .is_some_and(Value::is_object)
+    {
+        return Err(ModernHttpValidationError::invalid_params(
+            "missing params._meta.io.modelcontextprotocol/clientCapabilities",
+        ));
+    }
+    if let Some(client_info) = meta.get("io.modelcontextprotocol/clientInfo") {
+        if !client_info.is_object() {
+            return Err(ModernHttpValidationError::invalid_params(
+                "params._meta.io.modelcontextprotocol/clientInfo must be an object when present",
+            ));
+        }
+    }
+    if let Some(id) = id {
+        if !is_valid_json_rpc_id(id) {
+            return Err(ModernHttpValidationError::invalid_params(
+                "JSON-RPC id must be a string or integer and must not be null",
+            ));
+        }
+    }
+
+    if matches!(method, "tools/call" | "resources/read" | "prompts/get") {
+        let expected = params_name_for_mcp_header(method, params).ok_or_else(|| {
+            ModernHttpValidationError::header_mismatch(format!(
+                "missing request name for {method} Mcp-Name validation"
+            ))
+        })?;
+        let header_name = header_value(headers, "Mcp-Name")
+            .ok_or_else(|| ModernHttpValidationError::header_mismatch("missing Mcp-Name header"))?;
+        let decoded_header_name = decode_mcp_header_value(header_name).map_err(|message| {
+            ModernHttpValidationError::header_mismatch(format!(
+                "invalid Mcp-Name header: {message}"
+            ))
+        })?;
+        if decoded_header_name != expected {
+            return Err(ModernHttpValidationError::header_mismatch(format!(
+                "Mcp-Name header ({decoded_header_name}) does not match request name ({expected})"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_modern_stdio_request(
+    id: Option<&Value>,
+    params: &Value,
+) -> std::result::Result<(), ModernHttpValidationError> {
+    let body_version = body_protocol_version(params).ok_or_else(|| {
+        ModernHttpValidationError::invalid_params(
+            "missing params._meta.io.modelcontextprotocol/protocolVersion",
+        )
+    })?;
+    if body_version != MODERN_PROTOCOL_VERSION {
+        return Err(ModernHttpValidationError::unsupported_version(
+            body_version.to_string(),
+        ));
+    }
+    let meta = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            ModernHttpValidationError::invalid_params("params._meta must be an object")
+        })?;
+    if !meta
+        .get("io.modelcontextprotocol/clientCapabilities")
+        .is_some_and(Value::is_object)
+    {
+        return Err(ModernHttpValidationError::invalid_params(
+            "missing params._meta.io.modelcontextprotocol/clientCapabilities",
+        ));
+    }
+    if let Some(client_info) = meta.get("io.modelcontextprotocol/clientInfo") {
+        if !client_info.is_object() {
+            return Err(ModernHttpValidationError::invalid_params(
+                "params._meta.io.modelcontextprotocol/clientInfo must be an object when present",
+            ));
+        }
+    }
+    if let Some(id) = id {
+        if !is_valid_json_rpc_id(id) {
+            return Err(ModernHttpValidationError::invalid_params(
+                "JSON-RPC id must be a string or integer and must not be null",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_origin(headers: &[(String, String)]) -> std::result::Result<(), String> {
+    let Some(origin) = header_value(headers, "Origin") else {
+        return Ok(());
+    };
+    if origin == "null" {
+        return Err("invalid Origin header: null origin is not allowed".to_string());
+    }
+    let Some(origin_host) = origin_host(origin) else {
+        return Err(format!("invalid Origin header: {origin}"));
+    };
+    if is_loopback_host(origin_host) {
+        return Ok(());
+    }
+    let Some(host_header) = header_value(headers, "Host") else {
+        return Err(
+            "invalid Origin header: Host header is required for non-loopback origins".to_string(),
+        );
+    };
+    let Some(request_host) = host_without_port(host_header) else {
+        return Err(format!("invalid Host header: {host_header}"));
+    };
+    if origin_host.eq_ignore_ascii_case(request_host) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid Origin header: {origin_host} does not match Host {request_host}"
+        ))
+    }
+}
+
+fn origin_host(origin: &str) -> Option<&str> {
+    let (_, rest) = origin.split_once("://")?;
+    if rest.is_empty() || rest.contains('/') || rest.contains('?') || rest.contains('#') {
+        return None;
+    }
+    host_without_port(rest)
+}
+
+fn host_without_port(host_port: &str) -> Option<&str> {
+    if host_port.is_empty() {
+        return None;
+    }
+    if let Some(rest) = host_port.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return Some(&host_port[..=end + 1]);
+    }
+    Some(host_port.split(':').next().unwrap_or(host_port))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "[::1]" | "::1")
+}
+
+fn validate_plain_header_value(value: &str) -> std::result::Result<(), &'static str> {
+    if value.is_empty() {
+        return Err("value is empty");
+    }
+    if value
+        .as_bytes()
+        .iter()
+        .any(|byte| !matches!(*byte, 0x21..=0x7e))
+    {
+        return Err("value contains characters that must be encoded");
+    }
+    Ok(())
+}
+
+fn decode_mcp_header_value(value: &str) -> std::result::Result<String, String> {
+    const PREFIX: &str = "=?base64?";
+    const SUFFIX: &str = "?=";
+    if let Some(encoded) = value
+        .strip_prefix(PREFIX)
+        .and_then(|rest| rest.strip_suffix(SUFFIX))
+    {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| format!("invalid base64 sentinel: {error}"))?;
+        return String::from_utf8(decoded)
+            .map_err(|error| format!("base64 sentinel did not decode to UTF-8: {error}"));
+    }
+    if value.starts_with("=?base64?") || value.ends_with("?=") {
+        return Err("malformed base64 sentinel".to_string());
+    }
+    if value.is_empty() || value.trim_matches([' ', '\t']) != value {
+        return Err("value must use base64 sentinel encoding".to_string());
+    }
+    if value
+        .as_bytes()
+        .iter()
+        .any(|byte| !matches!(*byte, 0x20..=0x7e))
+    {
+        return Err("value contains characters that must be encoded".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn is_valid_json_rpc_id(id: &Value) -> bool {
+    match id {
+        Value::String(_) => true,
+        Value::Number(number) => number.as_i64().is_some() || number.as_u64().is_some(),
+        _ => false,
+    }
+}
+
+fn body_protocol_version(params: &Value) -> Option<&str> {
+    params
+        .get("_meta")
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+}
+
+fn params_name_for_mcp_header<'a>(method: &str, params: &'a Value) -> Option<&'a str> {
+    match method {
+        "tools/call" | "prompts/get" => params.get("name").and_then(Value::as_str),
+        "resources/read" => params.get("uri").and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn read_http_request(stream: &mut TcpStream) -> io::Result<ParsedHttpRequest> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed before headers",
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() > MAX_HTTP_BODY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request exceeds maximum size",
+            ));
+        }
+        if let Some(pos) = find_header_end(&buffer) {
+            break pos;
+        }
+    };
+
+    let header_text = std::str::from_utf8(&buffer[..header_end])
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request line"))?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing method"))?
+        .to_string();
+    let path = parts
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing path"))?
+        .to_string();
+
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed header"))?;
+        headers.push((name.trim().to_string(), value.trim().to_string()));
+    }
+
+    let content_length = header_value(&headers, "content-length")
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if content_length > MAX_HTTP_BODY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "request body exceeds maximum size",
+        ));
+    }
+
+    let body_start = header_end + 4;
+    while buffer.len().saturating_sub(body_start) < content_length {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed before complete body",
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len().saturating_sub(body_start) > MAX_HTTP_BODY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request body exceeds maximum size",
+            ));
+        }
+    }
+
+    let body_bytes = &buffer[body_start..body_start + content_length];
+    let body = std::str::from_utf8(body_bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        .to_string();
+
+    Ok(ParsedHttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn http_empty_response(status: &str) -> String {
+    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+}
+
+fn http_text_response(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+fn http_json_response(status: &str, body: &Value) -> String {
+    let body = body.to_string();
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+fn json_rpc_error_response(
+    status: &str,
+    id: Option<Value>,
+    code: i32,
+    message: impl Into<String>,
+    data: Option<Value>,
+) -> String {
+    let mut error = serde_json::Map::new();
+    error.insert("code".to_string(), Value::from(code));
+    error.insert("message".to_string(), Value::String(message.into()));
+    if let Some(data) = data {
+        error.insert("data".to_string(), data);
+    }
+    http_json_response(
+        status,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id.unwrap_or(Value::Null),
+            "error": Value::Object(error)
+        }),
+    )
 }
 
 enum RequestOutcome {
@@ -767,17 +1445,29 @@ fn is_tool_for_stacks(tool_name: &str, stacks: &[String]) -> bool {
 }
 
 fn json_error(id: Value, code: i32, message: &str) -> Value {
+    json_error_with_data(id, code, message, None)
+}
+
+fn json_error_with_data(id: Value, code: i32, message: &str, data: Option<Value>) -> Value {
+    let mut error = serde_json::Map::new();
+    error.insert("code".to_string(), Value::from(code));
+    error.insert("message".to_string(), Value::String(message.to_string()));
+    if let Some(data) = data {
+        error.insert("data".to_string(), data);
+    }
     json!({
         "jsonrpc": "2.0",
         "id": id,
-        "error": {
-            "code": code,
-            "message": message
-        }
+        "error": Value::Object(error)
     })
 }
 
-fn respond_tool_call(id: Value, reg: &ToolRegistration, params: &Value) -> Value {
+fn respond_tool_call(
+    id: Value,
+    reg: &ToolRegistration,
+    params: &Value,
+    server_info: Value,
+) -> Value {
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     let started = Instant::now();
     let tool_name = reg.def.name.clone();
@@ -790,23 +1480,23 @@ fn respond_tool_call(id: Value, reg: &ToolRegistration, params: &Value) -> Value
     debug_log(&format!(
         "[mcp-server] tools/call finish name={tool_name} duration_ms={duration_ms} is_error={is_error}"
     ));
-    // Per the MCP spec, `structuredContent` must be the tool's structured RESULT —
-    // clients that render it then show the data, not a metadata envelope. Wrap the
-    // payload under `result` (structuredContent must be an object) and move call
-    // metadata to `_meta`. `content[0].text` stays as the fallback for clients that
-    // don't read structuredContent.
+    // Forge keeps a stable structuredContent contract for all tools by wrapping
+    // handler output under `result`; metadata lives in `_meta`. `content[0].text`
+    // stays as the fallback for clients that do not read structuredContent.
     let result_value: Value =
         serde_json::from_str::<Value>(&text).unwrap_or_else(|_| Value::String(text.clone()));
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
+            "resultType": "complete",
             "content": [{"type": "text", "text": text}],
             "structuredContent": { "result": result_value },
             "_meta": {
                 "tool": tool_name,
                 "duration_ms": duration_ms,
-                "is_error": is_error
+                "is_error": is_error,
+                "io.modelcontextprotocol/serverInfo": server_info
             },
             "isError": is_error
         }
@@ -865,6 +1555,36 @@ mod tests {
         );
     }
 
+    fn response_json(response: &str) -> Value {
+        let (_, body) = response
+            .split_once("\r\n\r\n")
+            .expect("HTTP response must contain separator");
+        serde_json::from_str(body).expect("HTTP response body must be JSON")
+    }
+
+    fn modern_headers(method: &str) -> Vec<(String, String)> {
+        vec![
+            (
+                "MCP-Protocol-Version".to_string(),
+                MODERN_PROTOCOL_VERSION.to_string(),
+            ),
+            ("Mcp-Method".to_string(), method.to_string()),
+        ]
+    }
+
+    fn modern_params() -> Value {
+        json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "test-client",
+                    "version": "0.1.0"
+                },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        })
+    }
+
     fn score_policy() -> Value {
         json!({
             "defaultBasePriority": 0,
@@ -903,10 +1623,63 @@ mod tests {
         let resp = server.respond_tools_list(json!(1));
         let tools = &resp["result"]["tools"];
         assert!(tools.is_array());
+        assert_eq!(resp["result"]["resultType"], "complete");
+        assert_eq!(resp["result"]["cacheScope"], MODERN_CACHE_SCOPE);
         let arr = tools.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["name"], "echo");
         assert_eq!(arr[1]["name"], "fail");
+    }
+
+    #[test]
+    fn test_server_discover_response() {
+        let server = make_server();
+        let resp = server.respond_server_discover(json!(7));
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 7);
+        assert_eq!(resp["result"]["resultType"], "complete");
+        assert_eq!(
+            resp["result"]["supportedVersions"][0],
+            MODERN_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            resp["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "test-server"
+        );
+    }
+
+    #[test]
+    fn stdio_server_discover_requires_modern_meta() {
+        let server = make_server();
+        let resp = server.handle_request(json!(1), "server/discover", &json!({}));
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn stdio_server_discover_rejects_unsupported_protocol_version() {
+        let server = make_server();
+        let resp = server.handle_request(
+            json!(1),
+            "server/discover",
+            &json!({
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2099-01-01",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }),
+        );
+        assert_eq!(resp["error"]["code"], UNSUPPORTED_PROTOCOL_VERSION);
+        assert_eq!(
+            resp["error"]["data"]["supported"][0],
+            MODERN_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn stdio_server_discover_accepts_modern_meta() {
+        let server = make_server();
+        let resp = server.handle_request(json!(1), "server/discover", &modern_params());
+        assert_eq!(resp["result"]["resultType"], "complete");
     }
 
     #[test]
@@ -942,6 +1715,7 @@ mod tests {
 
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], 1);
+        assert_eq!(resp["result"]["resultType"], "complete");
         assert_eq!(resp["result"]["isError"], false);
         let content = &resp["result"]["content"];
         assert!(content.is_array());
@@ -953,6 +1727,10 @@ mod tests {
         assert_eq!(resp["result"]["_meta"]["tool"], "echo");
         assert!(resp["result"]["_meta"]["duration_ms"].is_number());
         assert_eq!(resp["result"]["_meta"]["is_error"], false);
+        assert_eq!(
+            resp["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "test-server"
+        );
     }
 
     #[test]
@@ -1004,6 +1782,220 @@ mod tests {
     }
 
     #[test]
+    fn http_server_discover_returns_modern_response() {
+        let server = make_server();
+        let response = handle_http_request(
+            &server,
+            ParsedHttpRequest {
+                method: "POST".into(),
+                path: "/mcp".into(),
+                headers: modern_headers("server/discover"),
+                body: json!({
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "server/discover",
+                    "params": modern_params()
+                })
+                .to_string(),
+            },
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        let body = response_json(&response);
+        assert_eq!(body["result"]["resultType"], "complete");
+        assert_eq!(
+            body["result"]["supportedVersions"][0],
+            MODERN_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn http_rejects_missing_method_header() {
+        let server = make_server();
+        let response = handle_http_request(
+            &server,
+            ParsedHttpRequest {
+                method: "POST".into(),
+                path: "/mcp".into(),
+                headers: vec![(
+                    "MCP-Protocol-Version".to_string(),
+                    MODERN_PROTOCOL_VERSION.to_string(),
+                )],
+                body: json!({
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "tools/list",
+                    "params": modern_params()
+                })
+                .to_string(),
+            },
+        );
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert_eq!(response_json(&response)["error"]["code"], HEADER_MISMATCH);
+    }
+
+    #[test]
+    fn http_rejects_mismatched_tool_name_header() {
+        let server = make_server();
+        let mut headers = modern_headers("tools/call");
+        headers.push(("Mcp-Name".to_string(), "wrong".to_string()));
+        let mut params = modern_params();
+        params["name"] = Value::String("echo".into());
+        params["arguments"] = json!({"text": "hello"});
+        let response = handle_http_request(
+            &server,
+            ParsedHttpRequest {
+                method: "POST".into(),
+                path: "/mcp".into(),
+                headers,
+                body: json!({
+                    "jsonrpc": "2.0",
+                    "id": 13,
+                    "method": "tools/call",
+                    "params": params
+                })
+                .to_string(),
+            },
+        );
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert_eq!(response_json(&response)["error"]["code"], HEADER_MISMATCH);
+    }
+
+    #[test]
+    fn http_rejects_missing_client_capabilities_meta() {
+        let server = make_server();
+        let response = handle_http_request(
+            &server,
+            ParsedHttpRequest {
+                method: "POST".into(),
+                path: "/mcp".into(),
+                headers: modern_headers("tools/list"),
+                body: json!({
+                    "jsonrpc": "2.0",
+                    "id": 14,
+                    "method": "tools/list",
+                    "params": {
+                        "_meta": {
+                            "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION
+                        }
+                    }
+                })
+                .to_string(),
+            },
+        );
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert_eq!(response_json(&response)["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn http_accepts_base64_encoded_tool_name_header() {
+        let mut server = make_server();
+        add_echo_tool(&mut server);
+        let mut headers = modern_headers("tools/call");
+        headers.push(("Mcp-Name".to_string(), "=?base64?ZWNobw==?=".to_string()));
+        let mut params = modern_params();
+        params["name"] = Value::String("echo".into());
+        params["arguments"] = json!({"text": "hello"});
+        let response = handle_http_request(
+            &server,
+            ParsedHttpRequest {
+                method: "POST".into(),
+                path: "/mcp".into(),
+                headers,
+                body: json!({
+                    "jsonrpc": "2.0",
+                    "id": 15,
+                    "method": "tools/call",
+                    "params": params
+                })
+                .to_string(),
+            },
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(
+            response_json(&response)["result"]["structuredContent"]["result"],
+            "hello"
+        );
+    }
+
+    #[test]
+    fn http_rejects_null_json_rpc_id() {
+        let server = make_server();
+        let response = handle_http_request(
+            &server,
+            ParsedHttpRequest {
+                method: "POST".into(),
+                path: "/mcp".into(),
+                headers: modern_headers("tools/list"),
+                body: json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "method": "tools/list",
+                    "params": modern_params()
+                })
+                .to_string(),
+            },
+        );
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert_eq!(response_json(&response)["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn http_rejects_non_loopback_origin_that_does_not_match_host() {
+        let server = make_server();
+        let response = handle_http_request(
+            &server,
+            ParsedHttpRequest {
+                method: "GET".into(),
+                path: "/health".into(),
+                headers: vec![
+                    ("Host".to_string(), "forge.example.com".to_string()),
+                    ("Origin".to_string(), "https://evil.example.com".to_string()),
+                ],
+                body: String::new(),
+            },
+        );
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+    }
+
+    #[test]
+    fn http_get_or_delete_mcp_returns_method_not_allowed() {
+        let server = make_server();
+        for method in ["GET", "DELETE"] {
+            let response = handle_http_request(
+                &server,
+                ParsedHttpRequest {
+                    method: method.into(),
+                    path: "/mcp".into(),
+                    headers: Vec::new(),
+                    body: String::new(),
+                },
+            );
+            assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
+        }
+    }
+
+    #[test]
+    fn http_rejects_client_json_rpc_response_body() {
+        let server = make_server();
+        let response = handle_http_request(
+            &server,
+            ParsedHttpRequest {
+                method: "POST".into(),
+                path: "/mcp".into(),
+                headers: modern_headers("tools/list"),
+                body: json!({
+                    "jsonrpc": "2.0",
+                    "id": 99,
+                    "result": {}
+                })
+                .to_string(),
+            },
+        );
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert_eq!(response_json(&response)["error"]["code"], -32600);
+    }
+
+    #[test]
     fn test_tool_def_serializes_input_schema() {
         let def = ToolDef {
             name: "my_tool".to_owned(),
@@ -1016,6 +2008,7 @@ mod tests {
         // camelCase rename
         assert!(v.get("inputSchema").is_some());
         assert!(v.get("input_schema").is_none());
+        assert_eq!(v["outputSchema"]["required"], json!(["result"]));
     }
 
     #[test]

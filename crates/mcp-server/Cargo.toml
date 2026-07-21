@@ -9,6 +9,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 forge-checklist-state = { path = "../checklist-state" }
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = { workspace = true }

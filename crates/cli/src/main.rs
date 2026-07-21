@@ -38,6 +38,14 @@ struct Cli {
     /// Run as MCP server over stdio (JSON-RPC 2.0)
     #[arg(long)]
     mcp: bool,
+
+    /// Run as MCP server over Streamable HTTP
+    #[arg(long)]
+    mcp_http: bool,
+
+    /// Bind address for --mcp-http
+    #[arg(long, default_value = "127.0.0.1:9977")]
+    mcp_http_addr: String,
 }
 
 #[derive(Subcommand)]
@@ -1749,8 +1757,8 @@ fn finish_task<T: serde::Serialize>(
     serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
 }
 
-/// Run forge as an MCP server over stdio, exposing all commands as tools.
-fn run_mcp_server() -> anyhow::Result<()> {
+/// Build the Forge MCP server with all tool registrations.
+fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
     use forge_mcp_server::{McpServer, ToolDef};
 
     // MCP calls should stay responsive and avoid long-lived helper subprocesses
@@ -3852,7 +3860,17 @@ fn run_mcp_server() -> anyhow::Result<()> {
         }),
     );
 
-    server.run()
+    Ok(server)
+}
+
+/// Run forge as an MCP server over stdio, exposing all commands as tools.
+fn run_mcp_server() -> anyhow::Result<()> {
+    build_mcp_server()?.run()
+}
+
+/// Run forge as an MCP server over Streamable HTTP.
+fn run_mcp_http_server(bind_addr: &str) -> anyhow::Result<()> {
+    build_mcp_server()?.run_http(bind_addr)
 }
 
 /// Minimal parsed ferrosa-memory config.
@@ -4360,13 +4378,22 @@ fn read_structured_json<T: serde::de::DeserializeOwned>(
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    if cli.mcp && cli.mcp_http {
+        anyhow::bail!("choose either --mcp for stdio or --mcp-http for HTTP, not both");
+    }
+
     // --mcp mode: run as MCP server over stdio
     if cli.mcp {
         return run_mcp_server();
     }
+    if cli.mcp_http {
+        return run_mcp_http_server(&cli.mcp_http_addr);
+    }
 
     let command = cli.command.ok_or_else(|| {
-        anyhow::anyhow!("No command provided. Use --help for usage, or --mcp to run as MCP server.")
+        anyhow::anyhow!(
+            "No command provided. Use --help for usage, --mcp for stdio, or --mcp-http for HTTP."
+        )
     })?;
 
     match command {

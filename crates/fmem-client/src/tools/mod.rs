@@ -31,7 +31,7 @@ pub use count_entities_by_type::{
 pub use ensure_parent_tag::{
     ensure_parent_tag, EnsureParentTagAction, EnsureParentTagArgs, EnsureParentTagResponse,
 };
-pub use handshake::{initialize, ExpectedProtocolVersion, InitializeInfo, MCP_PROTOCOL_VERSION};
+pub use handshake::{initialize, ExpectedProtocolVersion, InitializeInfo};
 pub use ingest_entities::{
     ingest_entities, EdgeStats, EmbeddingStats, EntityStats, IngestEntitiesArgs,
     IngestEntitiesResponse, IngestOptions, WireEdge, WireEntity, WireFailedRow,
