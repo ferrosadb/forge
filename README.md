@@ -9,6 +9,11 @@ Token-saving tools for coding agents. A single binary (`frg`) with structured-JS
 
 **Status:** developer preview. Forge is useful today, but the public API and MCP tool surface may still change before a 1.0 release.
 
+## Community and support
+
+Join the [Ferrosa Discord](https://discord.gg/BTpKMp9HRM) to discuss workflows,
+ask questions, and report issues with the community and maintainers.
+
 ## Why forge?
 
 Raw `cargo`, `go test`, `pytest`, and `git diff` output is verbose and token-expensive. `frg` wraps the most common operations and returns structured JSON: errors with file paths and line numbers, warnings grouped by rule, summaries instead of wall-of-text logs. The MCP layer surfaces the same tools directly to Claude Code without shell round-trips.
