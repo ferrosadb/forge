@@ -36,7 +36,11 @@ pub struct IngestOptions {
     pub strict_edges: bool,
 
     /// If `true`, fmem generates embeddings server-side.
-    /// forge generates embeddings separately; set `false` here.
+    ///
+    /// Must stay `true` on this path. `WireEntity` has no embedding field, so
+    /// forge cannot attach vectors here no matter what the caller intends --
+    /// the older comment claiming "forge generates embeddings separately" was
+    /// simply wrong, and forge has no embedding client at all.
     pub embed_missing: bool,
 }
 
@@ -45,7 +49,7 @@ impl Default for IngestOptions {
         Self {
             on_conflict: "update".to_string(),
             strict_edges: true,
-            embed_missing: false,
+            embed_missing: true,
         }
     }
 }
@@ -227,6 +231,29 @@ pub fn ingest_entities(
     transport: &dyn Transport,
     args: IngestEntitiesArgs,
 ) -> Result<IngestEntitiesResponse, Error> {
+    // Refuse to write memory that can never be read back.
+    //
+    // fmem stores an entity vector only when the caller supplies one or
+    // embed_missing is set. WireEntity carries no vector, so embed_missing=false
+    // means every entity lands with none, every ANN source returns zero
+    // candidates, and semantic search is silently dead -- while the ingest
+    // reports success and the entity/edge counts look perfect. A fresh install
+    // ingested 262 entities and 222 edges this way and could not find one of
+    // them (t_2618e286).
+    //
+    // Checked here because this is the last point that still knows why: by the
+    // time a user runs a search, the cause is hundreds of writes in the past.
+    if !args.options.embed_missing {
+        return Err(Error::Schema(
+            "ingest_entities called with embed_missing=false, but forge sends no \
+embedding vectors on this path (WireEntity has no embedding field). Every entity \
+would be stored unsearchable -- semantic search would return nothing while the \
+ingest reported success. Leave embed_missing at its default so fmem embeds \
+server-side."
+                .to_owned(),
+        ));
+    }
+
     let args_value = serde_json::to_value(&args)
         .map_err(|e| Error::Schema(format!("failed to serialize IngestEntitiesArgs: {e}")))?;
     let raw = transport.call_tool("ingest_entities", args_value)?;
@@ -343,11 +370,40 @@ mod tests {
     }
 
     #[test]
-    fn default_options_sets_upsert_strict_no_embed() {
+    fn default_options_let_the_server_embed() {
         let opts = IngestOptions::default();
         assert_eq!(opts.on_conflict, "update");
         assert!(opts.strict_edges);
-        assert!(!opts.embed_missing);
+        // WireEntity has no embedding field, so forge cannot supply vectors on
+        // this path. Defaulting embed_missing to false stored every entity
+        // without one, and ANN retrieval then matched nothing -- memory that
+        // accepts writes and can never find them again.
+        assert!(
+            opts.embed_missing,
+            "forge sends no embeddings of its own, so the server must compute them"
+        );
+    }
+
+    #[test]
+    fn opting_out_of_embedding_fails_loudly_because_forge_sends_no_vectors() {
+        // Belt and braces for the default above: a caller that explicitly sets
+        // embed_missing=false is asking for entities that no semantic search
+        // can ever return. Nothing downstream reports that -- the ingest
+        // succeeds, the counts look right, and retrieval is silently dead --
+        // so it has to fail here, at the only point that still knows why.
+        let m = MockTransport::new();
+        let mut args = minimal_args(1, 0);
+        args.options.embed_missing = false;
+        let err = ingest_entities(&m, args).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("embed_missing"),
+            "the error must name the option that caused it, got: {message}"
+        );
+        assert!(
+            message.contains("unsearchable") || message.contains("semantic"),
+            "the error must say what breaks, not just that a flag is wrong, got: {message}"
+        );
     }
 
     #[test]

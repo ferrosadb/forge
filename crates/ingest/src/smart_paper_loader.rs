@@ -145,7 +145,7 @@ impl<'a> SmartPaperLoader<'a> {
                 options: IngestOptions {
                     on_conflict: "update".into(),
                     strict_edges: true,
-                    embed_missing: false,
+                    embed_missing: true,
                 },
             },
         )
