@@ -182,7 +182,12 @@ mod tests {
     #[test]
     fn explicit_wins_over_everything() {
         assert_eq!(
-            pick(Some("h:1"), Some("e:2".into()), Some("f:3".into()), Some("g:4".into())),
+            pick(
+                Some("h:1"),
+                Some("e:2".into()),
+                Some("f:3".into()),
+                Some("g:4".into())
+            ),
             "h:1"
         );
     }
@@ -190,7 +195,12 @@ mod tests {
     #[test]
     fn env_wins_when_no_explicit() {
         assert_eq!(
-            pick(None, Some("e:2".into()), Some("f:3".into()), Some("g:4".into())),
+            pick(
+                None,
+                Some("e:2".into()),
+                Some("f:3".into()),
+                Some("g:4".into())
+            ),
             "e:2"
         );
     }
@@ -241,7 +251,12 @@ mod tests {
         // A repo pinning its own board must win over a machine-wide default, or
         // checking out a project would silently talk to the wrong database.
         assert_eq!(
-            pick(None, None, Some("project:1".into()), Some("global:2".into())),
+            pick(
+                None,
+                None,
+                Some("project:1".into()),
+                Some("global:2".into())
+            ),
             "project:1"
         );
     }
@@ -275,7 +290,10 @@ mod tests {
         // One shape, two locations. A separate schema for the global file would
         // mean two formats to document and keep in step.
         let body = "cql_host = \"127.0.0.1:47017\"\ndebug_stop = true\n";
-        assert_eq!(parse_cql_host_toml(body).as_deref(), Some("127.0.0.1:47017"));
+        assert_eq!(
+            parse_cql_host_toml(body).as_deref(),
+            Some("127.0.0.1:47017")
+        );
         assert_eq!(parse_debug_stop_toml(body), Some(true));
     }
 
