@@ -4,7 +4,21 @@
 //! 1. explicit argument (the tool's `cql_host` / CLI `--cql-host`)
 //! 2. `FORGE_CQL_HOST` environment variable
 //! 3. `cql_host` in the nearest `.forge/config.toml` (walking up from the cwd)
-//! 4. the built-in [`DEFAULT_CQL_HOST`]
+//! 4. `cql_host` in the global `~/.config/forge.toml`
+//! 5. the built-in [`DEFAULT_CQL_HOST`]
+//!
+//! The global layer exists because every other layer is tied to WHERE forge is
+//! run from. An installer can configure a machine once -- which is what the
+//! Ferrosa workbench needs: it provisions a database on a non-default port, and
+//! before this the only ways to tell forge about it were an environment variable
+//! the user had to export or a per-project file in every repo they own. `forge
+//! task list` in a fresh directory failed with "connect to CQL ... Connection
+//! refused" against a database that was running the whole time.
+//!
+//! The path matches the rest of the system: forge already reads its memory
+//! client config from `~/.config/ferrosa-memory.toml`, so its own settings sit
+//! beside it as `~/.config/forge.toml`, with the same schema as the project
+//! file. Project still beats global, so a repo can pin its own board.
 //!
 //! Blank/whitespace values at any layer are ignored and fall through.
 
@@ -33,12 +47,18 @@ fn non_blank(s: String) -> Option<String> {
 }
 
 /// Pure precedence rule, separated from I/O for testing.
-fn pick(explicit: Option<&str>, env: Option<String>, file: Option<String>) -> String {
+fn pick(
+    explicit: Option<&str>,
+    env: Option<String>,
+    file: Option<String>,
+    global: Option<String>,
+) -> String {
     explicit
         .map(str::to_string)
         .and_then(non_blank)
         .or_else(|| env.and_then(non_blank))
         .or_else(|| file.and_then(non_blank))
+        .or_else(|| global.and_then(non_blank))
         .unwrap_or_else(|| DEFAULT_CQL_HOST.to_string())
 }
 
@@ -60,13 +80,28 @@ fn read_config_cql_host(start: &Path) -> Option<String> {
     None
 }
 
+/// The machine-wide config file: `~/.config/forge.toml`.
+///
+/// Beside `~/.config/ferrosa-memory.toml`, which forge already reads, so a user
+/// looking for "where do I configure this" finds both in one place.
+pub fn global_config_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(".config").join("forge.toml"))
+}
+
+/// Read the global config body, if there is one.
+fn read_global_config() -> Option<String> {
+    let path = global_config_path()?;
+    std::fs::read_to_string(path).ok()
+}
+
 /// Resolve the effective CQL `host:port` for the task store.
 pub fn resolve_cql_host(explicit: Option<&str>) -> String {
     let env = std::env::var("FORGE_CQL_HOST").ok();
     let file = std::env::current_dir()
         .ok()
         .and_then(|cwd| read_config_cql_host(&cwd));
-    pick(explicit, env, file)
+    let global = read_global_config().and_then(|body| parse_cql_host_toml(&body));
+    pick(explicit, env, file, global)
 }
 
 /// Split a (possibly comma-separated) contact-point string into individual
@@ -113,7 +148,7 @@ fn read_config_debug_stop(start: &Path) -> Option<bool> {
 
 /// Resolve whether `debug_stop` board alerting is on. Precedence: explicit tool
 /// arg → `FORGE_DEBUG_STOP` (1/true/yes) → `.forge/config.toml` `debug_stop` →
-/// false. The explicit arg lets the LLM flip it on per call when it suspects the
+/// `~/.config/forge.toml` `debug_stop` → false. The explicit arg lets the LLM flip it on per call when it suspects the
 /// board is degraded.
 pub fn resolve_debug_stop(explicit: Option<bool>) -> bool {
     if let Some(b) = explicit {
@@ -126,9 +161,17 @@ pub fn resolve_debug_stop(explicit: Option<bool>) -> bool {
             _ => {}
         }
     }
-    std::env::current_dir()
+    if let Some(project) = std::env::current_dir()
         .ok()
         .and_then(|cwd| read_config_debug_stop(&cwd))
+    {
+        return project;
+    }
+    // Same file, same schema, same precedence as cql_host -- a setting that
+    // honoured the global config for one key and ignored it for the other would
+    // be the more surprising design.
+    read_global_config()
+        .and_then(|body| parse_debug_stop_toml(&body))
         .unwrap_or(false)
 }
 
@@ -139,33 +182,101 @@ mod tests {
     #[test]
     fn explicit_wins_over_everything() {
         assert_eq!(
-            pick(Some("h:1"), Some("e:2".into()), Some("f:3".into())),
+            pick(Some("h:1"), Some("e:2".into()), Some("f:3".into()), Some("g:4".into())),
             "h:1"
         );
     }
 
     #[test]
     fn env_wins_when_no_explicit() {
-        assert_eq!(pick(None, Some("e:2".into()), Some("f:3".into())), "e:2");
+        assert_eq!(
+            pick(None, Some("e:2".into()), Some("f:3".into()), Some("g:4".into())),
+            "e:2"
+        );
     }
 
     #[test]
     fn file_used_when_no_explicit_or_env() {
-        assert_eq!(pick(None, None, Some("f:3".into())), "f:3");
+        assert_eq!(
+            pick(None, None, Some("f:3".into()), Some("g:4".into())),
+            "f:3"
+        );
     }
 
     #[test]
     fn default_when_nothing_set() {
-        assert_eq!(pick(None, None, None), DEFAULT_CQL_HOST);
+        assert_eq!(pick(None, None, None, None), DEFAULT_CQL_HOST);
     }
 
     #[test]
     fn blank_values_are_ignored() {
         assert_eq!(
-            pick(Some("   "), Some(String::new()), Some("f:3".into())),
+            pick(Some("   "), Some(String::new()), Some("f:3".into()), None),
             "f:3"
         );
-        assert_eq!(pick(Some("  "), Some("  ".into()), None), DEFAULT_CQL_HOST);
+        assert_eq!(
+            pick(Some("  "), Some("  ".into()), None, None),
+            DEFAULT_CQL_HOST
+        );
+        // A blank global falls through to the default rather than being taken
+        // as a configured empty host.
+        assert_eq!(pick(None, None, None, Some("   ".into())), DEFAULT_CQL_HOST);
+    }
+
+    #[test]
+    fn global_config_is_used_when_nothing_else_is_set() {
+        // The case that motivated this layer: an installer configured the
+        // machine, and the user runs `forge task list` in a directory with no
+        // .forge/config.toml and no exported variable. That previously reached
+        // the built-in default and failed against a database that was running
+        // the whole time.
+        assert_eq!(
+            pick(None, None, None, Some("127.0.0.1:47017".into())),
+            "127.0.0.1:47017"
+        );
+    }
+
+    #[test]
+    fn a_project_config_still_beats_the_global_one() {
+        // A repo pinning its own board must win over a machine-wide default, or
+        // checking out a project would silently talk to the wrong database.
+        assert_eq!(
+            pick(None, None, Some("project:1".into()), Some("global:2".into())),
+            "project:1"
+        );
+    }
+
+    #[test]
+    fn env_and_explicit_still_beat_the_global_one() {
+        assert_eq!(
+            pick(None, Some("env:1".into()), None, Some("global:2".into())),
+            "env:1"
+        );
+        assert_eq!(
+            pick(Some("explicit:1"), None, None, Some("global:2".into())),
+            "explicit:1"
+        );
+    }
+
+    #[test]
+    fn the_global_path_sits_beside_the_memory_client_config() {
+        // forge already reads ~/.config/ferrosa-memory.toml. Its own settings
+        // belong next to that, not in a third place a user has to discover.
+        let path = global_config_path().expect("home dir");
+        assert!(
+            path.ends_with(".config/forge.toml"),
+            "expected ~/.config/forge.toml, got {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn the_global_file_uses_the_same_schema_as_the_project_file() {
+        // One shape, two locations. A separate schema for the global file would
+        // mean two formats to document and keep in step.
+        let body = "cql_host = \"127.0.0.1:47017\"\ndebug_stop = true\n";
+        assert_eq!(parse_cql_host_toml(body).as_deref(), Some("127.0.0.1:47017"));
+        assert_eq!(parse_debug_stop_toml(body), Some(true));
     }
 
     #[test]

@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Added
+- **Global config at `~/.config/forge.toml`.** The task board's CQL host (and
+  `debug_stop`) can now be set machine-wide, resolved after an explicit
+  argument, `FORGE_CQL_HOST` and the nearest `.forge/config.toml`, and before
+  the built-in default. Same schema as the project file, and beside
+  `~/.config/ferrosa-memory.toml`, which forge already reads.
+
+  Every previous layer was tied to where forge is run from, so an installer
+  provisioning a database on a non-default port could only reach forge by asking
+  the user to export a variable or by dropping a file into every repo they own;
+  anything else met `connect to CQL ... Connection refused` against a database
+  that was running the whole time. A project config still wins, so a repo can
+  pin its own board.
 - **Google Sheets ↔ task board sync.** New `frg sheet auth|pull|push` and MCP
   `sheet_auth`/`sheet_pull`/`sheet_push`: pull open rows from a Google Sheet of
   bugs into the CQL task board (idempotent, never-move-backward) and push
