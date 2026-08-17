@@ -151,6 +151,32 @@ scrubbed text. No LLM summarizer is invoked in the search path.
 | `frg checklist <action>` | Persistent workflow checklists with dependencies, leases, attempts, waiting gates, reviews, and scoring |
 | `frg fmem-skill-ingest [--root <dir>]` | Ingest the SKILL.md catalog into ferrosa-memory as typed skill entities |
 
+#### Pointing the board at a database
+
+The task store resolves its CQL contact point in this order, first match wins:
+
+1. an explicit `--cql-host` / `cql_host` argument
+2. the `FORGE_CQL_HOST` environment variable
+3. `cql_host` in the nearest `.forge/config.toml`, walking up from the working
+   directory — use this to pin a repo to its own board
+4. `cql_host` in `~/.config/forge.toml` — machine-wide, for when a database
+   lives somewhere other than the default
+5. the built-in default, `127.0.0.1:9042`
+
+```toml
+# ~/.config/forge.toml
+cql_host = "127.0.0.1:47017"
+```
+
+Same schema as the project file, and it sits beside `~/.config/ferrosa-memory.toml`,
+which forge already reads for its memory client settings.
+
+The global layer exists because every other layer depends on **where forge is
+run from**: an installer that provisions a database on a non-default port could
+previously only reach forge by asking the user to export a variable or by
+dropping a file into every repo they own. Anything else met
+`connect to CQL ... Connection refused` against a database that was running fine.
+
 ### Google Sheets sync
 
 Two-way sync between a Google Sheet of bugs and the CQL task board. See [Google Sheets sync](#google-sheets-sync-1) for setup.
