@@ -3151,7 +3151,9 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                 "assignee":     {"type": "string",  "description": "Filter by assignee name"},
                 "priority_gte": {"type": "integer", "description": "Minimum priority (inclusive)"},
                 "priority_lte": {"type": "integer", "description": "Maximum priority (inclusive)"},
-                "limit":        {"type": "integer", "description": "Max results (default 50)"},
+                "limit":        {"type": "integer", "description": "Max results (default 50). Rows are returned NEWEST FIRST, so a limit keeps the most recent work rather than an arbitrary slice."},
+                "offset":       {"type": "integer", "description": "Skip this many rows before the limit, for paging through a long board."},
+                "full":         {"type": "boolean", "description": "Include body, result and metadata on every row. Off by default: a few hundred full rows exceed the tool-result token limit. Use task_get for the detail of a specific task."},
                 "cql_host":     {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"},
                 "debug_stop":   {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             }
@@ -3183,8 +3185,26 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                     .and_then(|v| v.as_u64())
                     .map(|i| i as usize),
             };
-            let tasks = store.list_tasks(filter).map_err(|e| e.to_string())?;
-            finish_task(&store, &args, &tasks)
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let page = store
+                .list_tasks_paged(filter, offset)
+                .map_err(|e| e.to_string())?;
+            let full = args.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
+            let rows: Vec<_> = if full {
+                page.tasks
+            } else {
+                page.tasks.iter().map(forge_tasks::Task::slim).collect()
+            };
+            // Report the window explicitly. A capped read that says so is usable;
+            // one that does not is worse than an error -- the previous behaviour
+            // silently omitted recent tasks and looked like a complete answer.
+            let payload = serde_json::json!({
+                "tasks": rows,
+                "total": page.total,
+                "offset": offset,
+                "truncated": page.truncated,
+            });
+            finish_task(&store, &args, &payload)
         }
     );
 
@@ -3313,6 +3333,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
             "type": "object",
             "properties": {
                 "cql_host": {"type": "string", "description": "CQL host:port (default: 127.0.0.1:9042)"},
+                "full": {"type": "boolean", "description": "Include body, result and metadata on every row. Off by default: the full board exceeds the tool-result token limit. Use task_get for the detail of a specific task."},
                 "debug_stop": {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             }
         }),
@@ -3321,7 +3342,16 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                 forge_tasks::resolve_cql_hosts(args.get("cql_host").and_then(|v| v.as_str()));
             let store = forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let board = store.board().map_err(|e| e.to_string())?;
-            finish_task(&store, &args,&board)
+            // Slim rows by default. The full board was 619,574 characters for 382
+            // tasks and exceeded the tool-result token limit outright, so an agent
+            // could not read it without spilling to a file. task_get still
+            // returns everything for the one task you pick.
+            let full = args
+                .get("full")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let board = if full { board } else { board.slim() };
+            finish_task(&store, &args, &board)
         }
     );
 
@@ -6202,8 +6232,18 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
                 priority_lte,
                 limit: Some(limit),
             };
-            let tasks = store.list_tasks(filter)?;
-            println!("{}", forge_shared::emit_json(&tasks, pretty)?);
+            // stdout keeps the plain array: `frg task list | jq` depends on it, and
+            // rows are now newest-first so a --limit keeps the most recent work.
+            // Truncation goes to STDERR rather than being folded into the payload,
+            // so a capped read still says so without breaking the pipe.
+            let page = store.list_tasks_paged(filter, 0)?;
+            if page.truncated {
+                eprintln!(
+                    "warning: read hit the fetch bound; {} rows scanned, so older tasks may be missing",
+                    page.total
+                );
+            }
+            println!("{}", forge_shared::emit_json(&page.tasks, pretty)?);
         }
 
         TaskAction::Link {

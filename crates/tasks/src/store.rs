@@ -73,6 +73,45 @@ pub struct TaskStore {
     tenant_id: String,
 }
 
+/// How many rows a board or list read will pull before it stops.
+///
+/// The reads used to pass the caller's `limit` straight to CQL. The tasks table
+/// is `PRIMARY KEY (tenant_id, task_id)`, so rows come back in task_id order --
+/// effectively arbitrary -- and a LIMIT therefore took an ARBITRARY SLICE, not
+/// the newest rows. With a few hundred open tasks the window stopped including
+/// anything recent: tasks created hours earlier were absent from both
+/// `task_board` and `task_list` while `task_get` returned them fine. An agent
+/// that captured a deferral and read the board back could not see its own write.
+///
+/// CQL cannot fix this with ORDER BY: `created_at` is not a clustering column, so
+/// ordering has to happen after the fetch, which means fetching enough to order
+/// meaningfully. This is that bound -- high enough to cover the whole board in
+/// practice, finite so a runaway table cannot be read into memory unbounded. When
+/// it is reached the caller is TOLD, rather than being handed a silent window.
+const MAX_FETCH_ROWS: usize = 10_000;
+
+/// Newest first, with task_id breaking ties so the order is total and a page
+/// boundary cannot shuffle between reads.
+pub(crate) fn sort_newest_first(tasks: &mut [Task]) {
+    tasks.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
+}
+
+/// A read that may have been cut short, and says so.
+#[derive(Debug, Clone)]
+pub struct FetchedTasks {
+    pub tasks: Vec<Task>,
+    /// Rows matching before the caller's limit/offset was applied.
+    pub total: usize,
+    /// True when MAX_FETCH_ROWS was hit, so `total` is a floor rather than the
+    /// count. A capped read that reports itself is usable; one that does not is
+    /// worse than an error.
+    pub truncated: bool,
+}
+
 impl TaskStore {
     /// Connect to the CQL cluster, create schema, and return a `TaskStore`.
     ///
@@ -376,12 +415,15 @@ impl TaskStore {
 
         let where_clause = conditions.join(" AND ");
         let limit = filter.limit.unwrap_or(100);
+        // Fetch to the bound, THEN order, THEN apply the caller's limit. Passing
+        // the limit to CQL took an arbitrary slice, because rows arrive in
+        // task_id order and created_at is not a clustering column.
         let cql = format!(
             "SELECT task_id, title, body, status, assignee, reviewer, priority, \
              workspace_kind, workspace_path, created_by, block_reason, result, summary, \
              metadata, skills, related_entity_ids, created_at, updated_at \
              FROM agent_memory.tasks WHERE {} LIMIT {} ALLOW FILTERING",
-            where_clause, limit
+            where_clause, MAX_FETCH_ROWS
         );
 
         let result = cql_exec!(self.rt, &self.session, cql)
@@ -395,7 +437,31 @@ impl TaskStore {
                 tasks.push(task);
             }
         }
+        sort_newest_first(&mut tasks);
+        tasks.truncate(limit);
         Ok(tasks)
+    }
+
+    /// As `list_tasks`, but reporting how many matched and whether the read was
+    /// cut short, so a caller can tell a complete answer from a window.
+    pub fn list_tasks_paged(&self, filter: TaskFilter, offset: usize) -> Result<FetchedTasks> {
+        let limit = filter.limit.unwrap_or(100);
+        // Ask for everything the bound allows; the window is applied here.
+        let mut unbounded = filter;
+        unbounded.limit = Some(MAX_FETCH_ROWS);
+        let mut tasks = self.list_tasks(unbounded)?;
+        let truncated = tasks.len() >= MAX_FETCH_ROWS;
+        let total = tasks.len();
+        let tasks = if offset >= tasks.len() {
+            Vec::new()
+        } else {
+            tasks.split_off(offset).into_iter().take(limit).collect()
+        };
+        Ok(FetchedTasks {
+            tasks,
+            total,
+            truncated,
+        })
     }
 
     /// Create a parent→child link (stored in both directions).
@@ -485,8 +551,9 @@ impl TaskStore {
              metadata, skills, related_entity_ids, created_at, updated_at \
              FROM agent_memory.tasks \
              WHERE tenant_id={tenant} \
-             LIMIT 500 ALLOW FILTERING",
+             LIMIT {limit} ALLOW FILTERING",
             tenant = self.tenant_id,
+            limit = MAX_FETCH_ROWS,
         );
 
         let result = cql_exec!(self.rt, &self.session, cql)
@@ -511,6 +578,19 @@ impl TaskStore {
                     TaskStatus::Archived => {}
                 }
             }
+        }
+
+        // Newest first in every column. Without this the board's order was
+        // task_id order -- arbitrary -- so the most recently captured work sat
+        // wherever its id happened to fall.
+        for column in [
+            &mut triage,
+            &mut ready,
+            &mut in_progress,
+            &mut blocked,
+            &mut complete,
+        ] {
+            sort_newest_first(column);
         }
 
         Ok(KanbanBoard {

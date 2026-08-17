@@ -147,6 +147,30 @@ pub struct TaskFilter {
 // KanbanBoard
 // ---------------------------------------------------------------------------
 
+impl Task {
+    /// A listing-sized copy: the fields you scan a board with, without the prose.
+    ///
+    /// `task_board` returned 619,574 characters for 382 rows and exceeded the
+    /// tool-result token limit outright, so an agent could not read the board at
+    /// all without spilling it to a file first. Almost all of that is `body`,
+    /// `result` and `metadata` -- the long-form fields that matter when you are
+    /// working a single task and are noise when you are choosing between eighty.
+    ///
+    /// `task_get` still returns everything, so nothing is lost: the detail is one
+    /// call away for the task you actually pick.
+    pub fn slim(&self) -> Task {
+        Task {
+            body: None,
+            result: None,
+            metadata: None,
+            // Kept: a one-line summary is what makes a listing decidable, and it
+            // is bounded by construction.
+            summary: self.summary.clone(),
+            ..self.clone()
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KanbanBoard {
     pub columns: KanbanColumns,
@@ -161,6 +185,22 @@ pub struct KanbanColumns {
     pub complete: Vec<Task>,
 }
 
+impl KanbanBoard {
+    /// Every column slimmed. See `Task::slim`.
+    pub fn slim(&self) -> KanbanBoard {
+        let slim = |column: &Vec<Task>| column.iter().map(Task::slim).collect();
+        KanbanBoard {
+            columns: KanbanColumns {
+                triage: slim(&self.columns.triage),
+                ready: slim(&self.columns.ready),
+                in_progress: slim(&self.columns.in_progress),
+                blocked: slim(&self.columns.blocked),
+                complete: slim(&self.columns.complete),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +211,92 @@ mod tests {
     /// serializes the in-memory `Task` via serde_json. Before this was locked
     /// in, a body with raw newlines could surface as unescaped control chars and
     /// break `frg task list | jq`.
+    fn task_at(id: &str, created_at: i64) -> Task {
+        Task {
+            task_id: id.to_string(),
+            title: format!("task {id}"),
+            body: Some("a long body that a listing does not need".repeat(40)),
+            status: TaskStatus::Triage,
+            assignee: None,
+            reviewer: None,
+            priority: 50,
+            workspace_kind: None,
+            workspace_path: None,
+            created_by: "agent".to_string(),
+            block_reason: None,
+            result: Some("a long result".repeat(40)),
+            summary: Some("one line that makes a listing decidable".to_string()),
+            metadata: None,
+            skills: Vec::new(),
+            related_entity_ids: Vec::new(),
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    #[test]
+    fn slim_drops_the_prose_and_keeps_what_a_listing_needs() {
+        // task_board returned 619,574 characters for 382 tasks and exceeded the
+        // tool-result token limit outright, so the board could not be read at all
+        // without spilling it to a file. Nearly all of it is body/result.
+        let full = task_at("t_1", 10);
+        let slim = full.slim();
+
+        assert_eq!(slim.body, None, "body is the bulk and belongs in task_get");
+        assert_eq!(slim.result, None);
+        assert_eq!(slim.metadata, None);
+
+        // Kept, because these are what make a row decidable without opening it.
+        assert_eq!(slim.task_id, "t_1");
+        assert_eq!(slim.title, full.title);
+        assert_eq!(slim.status, full.status);
+        assert_eq!(slim.priority, 50);
+        assert_eq!(slim.summary, full.summary);
+        assert_eq!(slim.created_at, 10);
+
+        let big = serde_json::to_string(&full).unwrap().len();
+        let small = serde_json::to_string(&slim).unwrap().len();
+        assert!(
+            small * 4 < big,
+            "slim should be far smaller: {small} vs {big}"
+        );
+    }
+
+    #[test]
+    fn a_board_column_is_ordered_newest_first() {
+        // The defect: rows arrive in task_id order because the table is
+        // PRIMARY KEY (tenant_id, task_id), so a LIMIT took an arbitrary slice
+        // rather than the newest rows. Tasks created hours earlier were absent
+        // from task_board and task_list while task_get returned them fine.
+        let mut column = vec![
+            task_at("t_aaa", 100),
+            task_at("t_zzz", 300),
+            task_at("t_mmm", 200),
+        ];
+        crate::store::sort_newest_first(&mut column);
+        assert_eq!(
+            column.iter().map(|t| t.created_at).collect::<Vec<_>>(),
+            vec![300, 200, 100],
+            "newest first, regardless of how task_id sorts"
+        );
+    }
+
+    #[test]
+    fn ties_break_on_task_id_so_paging_cannot_shuffle() {
+        // Two tasks created in the same millisecond must have a stable order, or a
+        // page boundary could return one twice and the other never.
+        let mut column = vec![task_at("t_bbb", 100), task_at("t_aaa", 100)];
+        crate::store::sort_newest_first(&mut column);
+        assert_eq!(
+            column
+                .iter()
+                .map(|t| t.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t_aaa", "t_bbb"],
+            "equal timestamps order by id, giving a total order"
+        );
+    }
+
     #[test]
     fn task_with_multiline_body_serializes_to_valid_json() {
         let task = Task {
