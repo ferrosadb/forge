@@ -570,7 +570,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "forge"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "forge-api-diff"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-outline",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "forge-checklist-state"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "forge-concurrency-scan"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "forge-coverage-gate"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "forge-dep-tree"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "ignore",
@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "forge-deps-audit"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "regex",
@@ -694,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "forge-devtools"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "regex",
@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "forge-diff-filter"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "forge-digest"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "forge-doc-coverage"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "forge-dsm-analyze"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "rand 0.9.4",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "forge-fail-loud-scan"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "ignore",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "forge-fmem-client"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "forge-format-fix"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-project-detect",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "forge-ingest"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "forge-lint-dedup"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "forge-log-distill"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "forge-log-monitor"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "forge-materialization-scan"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "ignore",
  "regex",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mcp-probe"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mcp-server"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "forge-merge-check"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mermaid-validate"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "regex",
@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "forge-outline"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "regex",
  "serde",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "forge-project-detect"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "forge-schema-diff"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "regex",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "forge-secret-scan"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "ignore",
@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "forge-shared"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "forge-sheet-sync"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "forge-smell-detect"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "forge-tasks"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "forge-test-summary"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "forge-threat-scan"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "ignore",
@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "forge-todo-extract"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "chrono",
