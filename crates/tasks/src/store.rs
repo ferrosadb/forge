@@ -100,7 +100,6 @@ pub(crate) fn sort_newest_first(tasks: &mut [Task]) {
     });
 }
 
-
 /// A read that may have been cut short, and says so.
 #[derive(Debug, Clone)]
 pub struct FetchedTasks {

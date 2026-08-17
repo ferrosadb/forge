@@ -288,7 +288,10 @@ mod tests {
         let mut column = vec![task_at("t_bbb", 100), task_at("t_aaa", 100)];
         crate::store::sort_newest_first(&mut column);
         assert_eq!(
-            column.iter().map(|t| t.task_id.as_str()).collect::<Vec<_>>(),
+            column
+                .iter()
+                .map(|t| t.task_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["t_aaa", "t_bbb"],
             "equal timestamps order by id, giving a total order"
         );

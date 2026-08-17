@@ -3185,10 +3185,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                     .and_then(|v| v.as_u64())
                     .map(|i| i as usize),
             };
-            let offset = args
-                .get("offset")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let page = store
                 .list_tasks_paged(filter, offset)
                 .map_err(|e| e.to_string())?;
