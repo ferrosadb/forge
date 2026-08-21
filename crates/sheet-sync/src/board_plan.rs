@@ -29,6 +29,7 @@
 use crate::config::SheetMapping;
 use crate::model::{CanonicalField, CanonicalRow};
 use crate::state::State;
+use anyhow::Context;
 use forge_tasks::{CreateTaskRequest, TaskStatus, UpdateTaskPatch};
 
 /// One planned board operation for a single sheet row.
@@ -77,8 +78,8 @@ pub fn plan_pull(
     rows: &[CanonicalRow],
     mapping: &SheetMapping,
     state: &State,
-    existing_status: &dyn Fn(&str) -> Option<TaskStatus>,
-) -> Vec<BoardOp> {
+    existing_status: &dyn Fn(&str) -> anyhow::Result<Option<TaskStatus>>,
+) -> anyhow::Result<Vec<BoardOp>> {
     rows.iter()
         .map(|row| plan_row(row, mapping, state, existing_status))
         .collect()
@@ -89,26 +90,29 @@ fn plan_row(
     row: &CanonicalRow,
     mapping: &SheetMapping,
     state: &State,
-    existing_status: &dyn Fn(&str) -> Option<TaskStatus>,
-) -> BoardOp {
+    existing_status: &dyn Fn(&str) -> anyhow::Result<Option<TaskStatus>>,
+) -> anyhow::Result<BoardOp> {
     let Some(entry) = state.rows.get(&row.id) else {
-        return BoardOp::Create {
+        return Ok(BoardOp::Create {
             row_id: row.id.clone(),
             req: build_create_request(row, mapping),
             target_status: target_status(row, mapping),
-        };
+        });
     };
 
     let hash = content_hash(row);
     if entry.content_hash == hash {
-        return BoardOp::Skip {
+        return Ok(BoardOp::Skip {
             row_id: row.id.clone(),
             reason: "unchanged".to_string(),
-        };
+        });
     }
 
-    let protected =
-        existing_status(&entry.task_id).is_some_and(|status| PROTECTED_STATUSES.contains(&status));
+    // Propagate: a status we could not read must stop the plan, not be treated
+    // as an unprotected task whose status the sheet may overwrite.
+    let protected = existing_status(&entry.task_id)
+        .with_context(|| format!("read current status of {}", entry.task_id))?
+        .is_some_and(|status| PROTECTED_STATUSES.contains(&status));
     let status = if protected {
         None
     } else {
@@ -127,11 +131,11 @@ fn plan_row(
         summary: None,
     };
 
-    BoardOp::Update {
+    Ok(BoardOp::Update {
         row_id: row.id.clone(),
         task_id: entry.task_id.clone(),
         patch,
-    }
+    })
 }
 
 /// Builds the `CreateTaskRequest` for a brand-new row. All fields not
@@ -379,8 +383,8 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
         }
     }
 
-    fn no_task_exists(_task_id: &str) -> Option<TaskStatus> {
-        None
+    fn no_task_exists(_task_id: &str) -> anyhow::Result<Option<TaskStatus>> {
+        Ok(None)
     }
 
     // -- build_create_request / target_status ------------------------------
@@ -396,7 +400,8 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
             &mapping,
             &state,
             &no_task_exists,
-        );
+        )
+        .unwrap();
         assert_eq!(ops.len(), 1);
 
         match &ops[0] {
@@ -474,7 +479,7 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
             },
         );
 
-        let ops = plan_pull(&[row], &mapping, &state, &no_task_exists);
+        let ops = plan_pull(&[row], &mapping, &state, &no_task_exists).unwrap();
         assert_eq!(ops.len(), 1);
         match &ops[0] {
             BoardOp::Skip { row_id, reason } => {
@@ -505,12 +510,12 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
             "Updated description".to_string(),
         );
 
-        let existing_status = |task_id: &str| -> Option<TaskStatus> {
+        let existing_status = |task_id: &str| -> anyhow::Result<Option<TaskStatus>> {
             assert_eq!(task_id, "t_existing01");
-            Some(TaskStatus::InProgress)
+            Ok(Some(TaskStatus::InProgress))
         };
 
-        let ops = plan_pull(&[row], &mapping, &state, &existing_status);
+        let ops = plan_pull(&[row], &mapping, &state, &existing_status).unwrap();
         assert_eq!(ops.len(), 1);
         match &ops[0] {
             BoardOp::Update {
@@ -553,12 +558,12 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
             "Updated description".to_string(),
         );
 
-        let existing_status = |task_id: &str| -> Option<TaskStatus> {
+        let existing_status = |task_id: &str| -> anyhow::Result<Option<TaskStatus>> {
             assert_eq!(task_id, "t_existing03");
-            Some(TaskStatus::Archived)
+            Ok(Some(TaskStatus::Archived))
         };
 
-        let ops = plan_pull(&[row], &mapping, &state, &existing_status);
+        let ops = plan_pull(&[row], &mapping, &state, &existing_status).unwrap();
         assert_eq!(ops.len(), 1);
         match &ops[0] {
             BoardOp::Update {
@@ -575,6 +580,44 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
             }
             other => panic!("expected Update, got {other:?}"),
         }
+    }
+
+    /// The never-move-backward rule is only as good as the status read behind
+    /// it. When that read failed, `get_task(..).ok()` reported `None`, the task
+    /// looked unprotected, and the plan overwrote a `complete` or `archived`
+    /// status with the sheet's value. A read we could not perform must stop the
+    /// plan.
+    #[test]
+    fn a_status_read_that_fails_stops_the_plan_instead_of_overwriting_the_status() {
+        let mapping = qa_mapping();
+        let mut row = qa_016();
+        let mut state = State::default();
+        state.upsert(
+            "QA-016".to_string(),
+            StateEntry {
+                task_id: "t_existing04".to_string(),
+                content_hash: content_hash(&row),
+                last_push_status: None,
+            },
+        );
+        row.fields.insert(
+            CanonicalField::Description,
+            "Updated description".to_string(),
+        );
+
+        let existing_status = |_task_id: &str| -> anyhow::Result<Option<TaskStatus>> {
+            Err(anyhow::anyhow!(
+                "cannot reach the task board at 127.0.0.1:9042"
+            ))
+        };
+
+        let err = plan_pull(&[row], &mapping, &state, &existing_status)
+            .expect_err("an unreadable status must fail the plan, not be treated as unprotected");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("t_existing04"),
+            "the error should name the task whose status could not be read, got: {rendered}"
+        );
     }
 
     #[test]
@@ -595,9 +638,10 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
             "Updated description".to_string(),
         );
 
-        let existing_status = |_task_id: &str| -> Option<TaskStatus> { Some(TaskStatus::Triage) };
+        let existing_status =
+            |_task_id: &str| -> anyhow::Result<Option<TaskStatus>> { Ok(Some(TaskStatus::Triage)) };
 
-        let ops = plan_pull(&[row], &mapping, &state, &existing_status);
+        let ops = plan_pull(&[row], &mapping, &state, &existing_status).unwrap();
         assert_eq!(ops.len(), 1);
         match &ops[0] {
             BoardOp::Update { patch, .. } => {

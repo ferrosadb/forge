@@ -26,7 +26,7 @@ impl BoardExec {
     /// that function's doc) and wraps the resulting store. No tenant
     /// scoping: sheet-sync operates on the default tenant.
     pub fn connect(cql_host: Option<&str>) -> anyhow::Result<Self> {
-        let hosts = resolve_cql_hosts(cql_host);
+        let hosts = resolve_cql_hosts(cql_host)?;
         let store = TaskStore::connect(&hosts, None)?;
         Ok(Self { store })
     }
@@ -39,8 +39,14 @@ impl BoardExec {
 }
 
 impl BoardSink for BoardExec {
-    fn existing_status(&self, task_id: &str) -> Option<TaskStatus> {
-        self.store.get_task(task_id).ok().map(|t| t.task.status)
+    fn existing_status(&self, task_id: &str) -> anyhow::Result<Option<TaskStatus>> {
+        // `get_task(..).ok()` turned "the board is unreachable" into "no such
+        // task", which is the answer that lets a pull overwrite a protected
+        // status. `find_task` keeps absence and failure apart.
+        Ok(self
+            .store
+            .find_task(task_id)?
+            .map(|found| found.task.status))
     }
 
     fn apply(&mut self, op: &BoardOp) -> anyhow::Result<Option<String>> {

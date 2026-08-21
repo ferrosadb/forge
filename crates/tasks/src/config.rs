@@ -21,9 +21,18 @@
 //! file. Project still beats global, so a repo can pin its own board.
 //!
 //! Blank/whitespace values at any layer are ignored and fall through.
+//!
+//! Every layer fails loud. A config file that exists but cannot be read or
+//! parsed is an ERROR, not a silent fall-through to the next layer: falling
+//! through sends the board query to `127.0.0.1:9042` -- a different database, or
+//! none at all -- while the user is looking at a file that says otherwise. The
+//! symptom is an empty or wrong board with no indication that the config they
+//! wrote was never applied. A file that is simply absent is not an error; that
+//! is what "not configured at this layer" means.
 
 use std::path::Path;
 
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 /// Built-in fallback when nothing else is configured.
@@ -62,22 +71,46 @@ fn pick(
         .unwrap_or_else(|| DEFAULT_CQL_HOST.to_string())
 }
 
+/// Parse a config body. A syntax error is reported, never swallowed.
+fn parse_config_toml(body: &str) -> Result<ForgeConfig> {
+    toml::from_str::<ForgeConfig>(body).context("invalid TOML")
+}
+
 /// Parse `cql_host` out of a `.forge/config.toml` body. Pure; testable.
-fn parse_cql_host_toml(body: &str) -> Option<String> {
-    toml::from_str::<ForgeConfig>(body)
-        .ok()
-        .and_then(|c| c.cql_host)
+fn parse_cql_host_toml(body: &str) -> Result<Option<String>> {
+    Ok(parse_config_toml(body)?.cql_host)
+}
+
+/// Read a config file. `Ok(None)` when it does not exist; `Err` when it exists
+/// and cannot be read (permissions, a directory in its place, an I/O fault) --
+/// those mean the user's settings were not applied, which they need to know.
+fn read_config_file(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(body) => Ok(Some(body)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read forge config {}", path.display())),
+    }
 }
 
 /// Walk up from `start` looking for `.forge/config.toml`; return its `cql_host`.
-fn read_config_cql_host(start: &Path) -> Option<String> {
+fn read_config_cql_host(start: &Path) -> Result<Option<String>> {
+    match find_project_config(start)? {
+        Some((path, body)) => {
+            parse_cql_host_toml(&body).with_context(|| format!("in {}", path.display()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The nearest `.forge/config.toml` walking up from `start`, with its body.
+fn find_project_config(start: &Path) -> Result<Option<(std::path::PathBuf, String)>> {
     for dir in start.ancestors() {
         let candidate = dir.join(".forge").join("config.toml");
-        if let Ok(body) = std::fs::read_to_string(&candidate) {
-            return parse_cql_host_toml(&body);
+        if let Some(body) = read_config_file(&candidate)? {
+            return Ok(Some((candidate, body)));
         }
     }
-    None
+    Ok(None)
 }
 
 /// The machine-wide config file: `~/.config/forge.toml`.
@@ -89,19 +122,41 @@ pub fn global_config_path() -> Option<std::path::PathBuf> {
 }
 
 /// Read the global config body, if there is one.
-fn read_global_config() -> Option<String> {
-    let path = global_config_path()?;
-    std::fs::read_to_string(path).ok()
+fn read_global_config() -> Result<Option<(std::path::PathBuf, String)>> {
+    let Some(path) = global_config_path() else {
+        return Ok(None);
+    };
+    Ok(read_config_file(&path)?.map(|body| (path, body)))
+}
+
+/// Read an environment variable. Absent is `Ok(None)`; present but not UTF-8
+/// is an error, because the user set it and it is not being honoured.
+fn env_var(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read {name}")),
+    }
 }
 
 /// Resolve the effective CQL `host:port` for the task store.
-pub fn resolve_cql_host(explicit: Option<&str>) -> String {
-    let env = std::env::var("FORGE_CQL_HOST").ok();
-    let file = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| read_config_cql_host(&cwd));
-    let global = read_global_config().and_then(|body| parse_cql_host_toml(&body));
-    pick(explicit, env, file, global)
+pub fn resolve_cql_host(explicit: Option<&str>) -> Result<String> {
+    let env = env_var("FORGE_CQL_HOST")?;
+    let file = match std::env::current_dir() {
+        Ok(cwd) => read_config_cql_host(&cwd)?,
+        // A cwd we cannot read is not "no project config" -- it is a question we
+        // failed to ask, and the answer decides which database is queried.
+        Err(e) => {
+            return Err(e).context("resolve the project forge config: read current directory")
+        }
+    };
+    let global = match read_global_config()? {
+        Some((path, body)) => {
+            parse_cql_host_toml(&body).with_context(|| format!("in {}", path.display()))?
+        }
+        None => None,
+    };
+    Ok(pick(explicit, env, file, global))
 }
 
 /// Split a (possibly comma-separated) contact-point string into individual
@@ -119,60 +174,71 @@ fn split_hosts(s: &str) -> Vec<String> {
 /// bootstrap from whichever is up and fail over for queries, so the board
 /// survives a single node loss instead of dying with one fixed contact point.
 /// Always returns at least one entry (the resolved value, or [`DEFAULT_CQL_HOST`]).
-pub fn resolve_cql_hosts(explicit: Option<&str>) -> Vec<String> {
-    let hosts = split_hosts(&resolve_cql_host(explicit));
-    if hosts.is_empty() {
+pub fn resolve_cql_hosts(explicit: Option<&str>) -> Result<Vec<String>> {
+    let hosts = split_hosts(&resolve_cql_host(explicit)?);
+    Ok(if hosts.is_empty() {
         vec![DEFAULT_CQL_HOST.to_string()]
     } else {
         hosts
+    })
+}
+
+/// Parse the `FORGE_DEBUG_STOP` value. Pure; testable without touching the
+/// process environment.
+///
+/// An unrecognised value is an error. Falling through to `false` left the
+/// degraded-board alerting the operator had just switched on silently OFF --
+/// the state they were trying to leave.
+fn parse_debug_stop_env(raw: &str) -> Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        other => anyhow::bail!(
+            "FORGE_DEBUG_STOP={other:?} is not a boolean (use 1/true/yes/on or 0/false/no/off)"
+        ),
     }
 }
 
 /// Parse `debug_stop` from a `.forge/config.toml` body. Pure; testable.
-fn parse_debug_stop_toml(body: &str) -> Option<bool> {
-    toml::from_str::<ForgeConfig>(body)
-        .ok()
-        .and_then(|c| c.debug_stop)
+fn parse_debug_stop_toml(body: &str) -> Result<Option<bool>> {
+    Ok(parse_config_toml(body)?.debug_stop)
 }
 
 /// Walk up from `start` for `.forge/config.toml`; return its `debug_stop`.
-fn read_config_debug_stop(start: &Path) -> Option<bool> {
-    for dir in start.ancestors() {
-        let candidate = dir.join(".forge").join("config.toml");
-        if let Ok(body) = std::fs::read_to_string(&candidate) {
-            return parse_debug_stop_toml(&body);
+fn read_config_debug_stop(start: &Path) -> Result<Option<bool>> {
+    match find_project_config(start)? {
+        Some((path, body)) => {
+            parse_debug_stop_toml(&body).with_context(|| format!("in {}", path.display()))
         }
+        None => Ok(None),
     }
-    None
 }
 
 /// Resolve whether `debug_stop` board alerting is on. Precedence: explicit tool
 /// arg → `FORGE_DEBUG_STOP` (1/true/yes) → `.forge/config.toml` `debug_stop` →
 /// `~/.config/forge.toml` `debug_stop` → false. The explicit arg lets the LLM flip it on per call when it suspects the
 /// board is degraded.
-pub fn resolve_debug_stop(explicit: Option<bool>) -> bool {
+pub fn resolve_debug_stop(explicit: Option<bool>) -> Result<bool> {
     if let Some(b) = explicit {
-        return b;
+        return Ok(b);
     }
-    if let Ok(raw) = std::env::var("FORGE_DEBUG_STOP") {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => return true,
-            "0" | "false" | "no" | "off" => return false,
-            _ => {}
-        }
+    if let Some(raw) = env_var("FORGE_DEBUG_STOP")? {
+        return parse_debug_stop_env(&raw);
     }
-    if let Some(project) = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| read_config_debug_stop(&cwd))
-    {
-        return project;
+    let cwd = std::env::current_dir()
+        .context("resolve the project forge config: read current directory")?;
+    if let Some(project) = read_config_debug_stop(&cwd)? {
+        return Ok(project);
     }
     // Same file, same schema, same precedence as cql_host -- a setting that
     // honoured the global config for one key and ignored it for the other would
     // be the more surprising design.
-    read_global_config()
-        .and_then(|body| parse_debug_stop_toml(&body))
-        .unwrap_or(false)
+    match read_global_config()? {
+        Some((path, body)) => Ok(parse_debug_stop_toml(&body)
+            .with_context(|| format!("in {}", path.display()))?
+            .unwrap_or(false)),
+        None => Ok(false),
+    }
 }
 
 #[cfg(test)]
@@ -291,10 +357,10 @@ mod tests {
         // mean two formats to document and keep in step.
         let body = "cql_host = \"127.0.0.1:47017\"\ndebug_stop = true\n";
         assert_eq!(
-            parse_cql_host_toml(body).as_deref(),
+            parse_cql_host_toml(body).unwrap().as_deref(),
             Some("127.0.0.1:47017")
         );
-        assert_eq!(parse_debug_stop_toml(body), Some(true));
+        assert_eq!(parse_debug_stop_toml(body).unwrap(), Some(true));
     }
 
     #[test]
@@ -311,34 +377,55 @@ mod tests {
     #[test]
     fn resolve_hosts_always_nonempty() {
         // A single explicit host yields one contact point; the list form yields many.
-        assert_eq!(resolve_cql_hosts(Some("h:1")), vec!["h:1"]);
+        assert_eq!(resolve_cql_hosts(Some("h:1")).unwrap(), vec!["h:1"]);
         assert_eq!(
-            resolve_cql_hosts(Some("n1:19042,n2:19042,n3:19042")),
+            resolve_cql_hosts(Some("n1:19042,n2:19042,n3:19042")).unwrap(),
             vec!["n1:19042", "n2:19042", "n3:19042"]
         );
     }
 
     #[test]
     fn parses_debug_stop_and_explicit_wins() {
-        assert_eq!(parse_debug_stop_toml("debug_stop = true\n"), Some(true));
-        assert_eq!(parse_debug_stop_toml("debug_stop = false\n"), Some(false));
-        assert_eq!(parse_debug_stop_toml("cql_host = \"h:1\"\n"), None);
+        assert_eq!(
+            parse_debug_stop_toml("debug_stop = true\n").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            parse_debug_stop_toml("debug_stop = false\n").unwrap(),
+            Some(false)
+        );
+        assert_eq!(parse_debug_stop_toml("cql_host = \"h:1\"\n").unwrap(), None);
         // explicit arg short-circuits env/file
-        assert!(resolve_debug_stop(Some(true)));
-        assert!(!resolve_debug_stop(Some(false)));
+        assert!(resolve_debug_stop(Some(true)).unwrap());
+        assert!(!resolve_debug_stop(Some(false)).unwrap());
+    }
+
+    /// A typo in `FORGE_DEBUG_STOP` used to fall through to `false`, silently
+    /// disabling the degraded-board alerting the operator had just switched on.
+    /// Asserted on the pure parser: mutating the process environment would race
+    /// the other tests in this binary.
+    #[test]
+    fn an_unparseable_debug_stop_value_is_an_error_not_a_silent_off() {
+        assert!(parse_debug_stop_env("1").unwrap());
+        assert!(!parse_debug_stop_env(" OFF ").unwrap());
+        let err =
+            parse_debug_stop_env("sure").expect_err("a non-boolean value must not be read as off");
+        assert!(format!("{err:#}").contains("FORGE_DEBUG_STOP"));
     }
 
     #[test]
     fn parses_cql_host_from_toml() {
         assert_eq!(
-            parse_cql_host_toml("cql_host = \"127.0.0.1:19042\"\n").as_deref(),
+            parse_cql_host_toml("cql_host = \"127.0.0.1:19042\"\n")
+                .unwrap()
+                .as_deref(),
             Some("127.0.0.1:19042")
         );
     }
 
     #[test]
     fn toml_without_cql_host_is_none() {
-        assert_eq!(parse_cql_host_toml("other = 1\n"), None);
+        assert_eq!(parse_cql_host_toml("other = 1\n").unwrap(), None);
     }
 
     #[test]
@@ -354,6 +441,60 @@ mod tests {
         .unwrap();
         let got = read_config_cql_host(&sub);
         std::fs::remove_dir_all(&base).ok();
-        assert_eq!(got.as_deref(), Some("10.0.0.1:9999"));
+        assert_eq!(got.unwrap().as_deref(), Some("10.0.0.1:9999"));
+    }
+
+    /// A `.forge/config.toml` with a syntax error used to be discarded by
+    /// `toml::from_str(..).ok()`, so forge queried `127.0.0.1:9042` while the
+    /// user was looking at a file naming a different port. The board then read
+    /// as empty (or as somebody else's), with nothing to say the file had been
+    /// ignored -- the same "I could not look" reported as "there is nothing".
+    #[test]
+    fn a_malformed_config_is_an_error_not_a_silent_fallback_to_the_default_host() {
+        let err = parse_cql_host_toml("cql_host = \n")
+            .expect_err("a malformed config must not be silently discarded");
+        assert!(
+            format!("{err:#}").contains("TOML"),
+            "the error should say the file is not valid TOML, got: {err:#}"
+        );
+        assert!(parse_debug_stop_toml("debug_stop = maybe\n").is_err());
+    }
+
+    #[test]
+    fn a_config_file_that_is_absent_is_not_an_error() {
+        // Absent means "not configured at this layer", which is the normal case
+        // and must keep falling through to the next one.
+        let missing = std::env::temp_dir().join("forge_no_such_config_file.toml");
+        assert!(read_config_file(&missing).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_config_file_that_cannot_be_read_is_an_error() {
+        // A directory where the file should be: it exists, so "not configured"
+        // is the wrong conclusion, and reading it fails with something other
+        // than NotFound.
+        let base = std::env::temp_dir().join(format!("forge_unreadable_{}", std::process::id()));
+        let path = base.join("config.toml");
+        std::fs::create_dir_all(&path).unwrap();
+        let got = read_config_file(&path);
+        std::fs::remove_dir_all(&base).ok();
+        assert!(
+            got.is_err(),
+            "a config path that exists but cannot be read must be an error"
+        );
+    }
+
+    #[test]
+    fn a_malformed_project_config_names_the_file_it_came_from() {
+        let base = std::env::temp_dir().join(format!("forge_badcfg_{}", std::process::id()));
+        std::fs::create_dir_all(base.join(".forge")).unwrap();
+        std::fs::write(base.join(".forge").join("config.toml"), "cql_host = \n").unwrap();
+        let got = read_config_cql_host(&base);
+        std::fs::remove_dir_all(&base).ok();
+        let err = got.expect_err("a malformed project config must be an error");
+        assert!(
+            format!("{err:#}").contains("config.toml"),
+            "the error must name the offending file, got: {err:#}"
+        );
     }
 }

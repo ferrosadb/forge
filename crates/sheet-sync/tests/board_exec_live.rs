@@ -40,7 +40,7 @@ fn create_with_non_triage_target_status_lands_via_follow_up_update() {
         .expect("create returns a task id");
 
     assert_eq!(
-        exec.existing_status(&task_id),
+        exec.existing_status(&task_id).expect("read status"),
         Some(TaskStatus::InProgress),
         "create + follow-up update should land the task at the mapped target status"
     );
