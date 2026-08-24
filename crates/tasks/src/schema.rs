@@ -1,5 +1,9 @@
 //! CQL schema for the task tables (idempotent CREATE TABLE IF NOT EXISTS).
 
+/// The keyspace the board lives in. Named in errors so "I connected but could
+/// not read the board" says *which* keyspace was missing.
+pub const BOARD_KEYSPACE: &str = "agent_memory";
+
 pub const CREATE_TASKS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS agent_memory.tasks (
     tenant_id uuid,

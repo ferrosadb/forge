@@ -104,7 +104,7 @@ pub fn pull(
     // before the apply loop takes a mutable borrow of `board`.
     let ops = plan_pull(&mapped.rows, mapping, &state, &|task_id| {
         board.existing_status(task_id)
-    });
+    })?;
 
     let mut created = 0usize;
     let mut updated = 0usize;
@@ -369,6 +369,20 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
         ])
     }
 
+    /// `pull_fixture_grid` with every row's Description set to `desc`, so a
+    /// test can change sheet-side content between two pulls.
+    fn sheets_with_description(desc: &str) -> FakeSheets {
+        let mut grid = pull_fixture_grid();
+        let col = qa_headers()
+            .iter()
+            .position(|h| h == "Description")
+            .expect("Description column");
+        for row in &mut grid.rows {
+            row[col] = desc.to_string();
+        }
+        FakeSheets::new(grid)
+    }
+
     /// Fixture grid used by both pull tests: two fresh, importable rows
     /// (QA-010 "New", QA-011 "Triaged"), one terminal row (QA-012
     /// "Verified/Closed"), and a QA-005 id collision across two rows.
@@ -430,6 +444,54 @@ terminal_status = ["Verified/Closed", "Won't Fix", "Duplicate"]
     }
 
     // -- pull: real -------------------------------------------------------
+
+    /// End-to-end counterpart of
+    /// `board_plan::tests::a_status_read_that_fails_stops_the_plan_instead_of_overwriting_the_status`:
+    /// a pull over rows that are already joined to tasks must FAIL when the
+    /// board cannot report their current status, rather than plan status
+    /// overwrites from a board it could not read.
+    #[test]
+    fn pull_fails_when_the_board_cannot_report_current_status() {
+        let mapping = qa_mapping();
+        let tmpdir = tempfile::tempdir().expect("tempdir creation");
+        let state_path = tmpdir
+            .path()
+            .join(".forge")
+            .join("sheets")
+            .join("qa.state.toml");
+
+        // First pull joins QA-010/QA-011 to tasks and records their hashes.
+        let mut board = FakeBoard::new();
+        pull(
+            &sheets_with_description("desc"),
+            &mut board,
+            &mapping,
+            &state_path,
+            &PullOptions { dry_run: false },
+        )
+        .expect("seed pull should succeed");
+
+        // Now the sheet content changes, so the plan must consult the board for
+        // each joined task's current status -- and the board cannot answer.
+        let mut broken = FakeBoard::new_failing_status_read();
+        let err = pull(
+            &sheets_with_description("edited description"),
+            &mut broken,
+            &mapping,
+            &state_path,
+            &PullOptions { dry_run: false },
+        )
+        .expect_err("a board that cannot report status must fail the pull");
+
+        assert!(
+            format!("{err:#}").contains("status"),
+            "the error should say the status read failed, got: {err:#}"
+        );
+        assert!(
+            broken.applied.is_empty(),
+            "nothing may be applied to the board once the plan failed"
+        );
+    }
 
     #[test]
     fn pull_real_applies_creates_and_persists_state() {

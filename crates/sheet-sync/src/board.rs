@@ -8,10 +8,15 @@ use forge_tasks::TaskStatus;
 
 /// Board read/write boundary for pull.
 pub trait BoardSink {
-    /// The board's *current* status for `task_id`, or `None` if no such task
-    /// is known to the board. Feeds [`crate::board_plan::plan_pull`]'s
+    /// The board's *current* status for `task_id`, or `Ok(None)` if no such
+    /// task is known to the board. Feeds [`crate::board_plan::plan_pull`]'s
     /// never-move-backward rule — see that module's doc.
-    fn existing_status(&self, task_id: &str) -> Option<TaskStatus>;
+    ///
+    /// A read that FAILS is an `Err`, never `Ok(None)`. Collapsing the two
+    /// disarmed the never-move-backward rule exactly when the board was
+    /// unreachable: an unreadable `complete` task looked like a task with no
+    /// status, and the pull happily reset it to the sheet's value.
+    fn existing_status(&self, task_id: &str) -> anyhow::Result<Option<TaskStatus>>;
 
     /// Applies one planned op to the board. Returns the task id it created
     /// or updated; `None` for [`BoardOp::Skip`], which never touches the
@@ -35,6 +40,9 @@ pub(crate) struct FakeBoard {
     /// was (and wasn't) persisted before the failure.
     fail_on_call: Option<usize>,
     call_count: usize,
+    /// When true, `existing_status` returns `Err` — simulates the board being
+    /// unreadable while a pull is deciding whether a task's status is protected.
+    fail_status_read: bool,
 }
 
 #[cfg(test)]
@@ -46,6 +54,7 @@ impl FakeBoard {
             next_id: 0,
             fail_on_call: None,
             call_count: 0,
+            fail_status_read: false,
         }
     }
 
@@ -58,6 +67,15 @@ impl FakeBoard {
         }
     }
 
+    /// A [`FakeBoard`] whose `existing_status` fails — the board is
+    /// reachable enough to be asked and cannot answer.
+    pub(crate) fn new_failing_status_read() -> Self {
+        Self {
+            fail_status_read: true,
+            ..Self::new()
+        }
+    }
+
     fn mint_task_id(&mut self) -> String {
         self.next_id += 1;
         format!("t_{}", self.next_id)
@@ -66,8 +84,11 @@ impl FakeBoard {
 
 #[cfg(test)]
 impl BoardSink for FakeBoard {
-    fn existing_status(&self, task_id: &str) -> Option<TaskStatus> {
-        self.statuses.get(task_id).cloned()
+    fn existing_status(&self, task_id: &str) -> anyhow::Result<Option<TaskStatus>> {
+        if self.fail_status_read {
+            anyhow::bail!("FakeBoard: simulated status-read failure for {task_id}");
+        }
+        Ok(self.statuses.get(task_id).cloned())
     }
 
     fn apply(&mut self, op: &BoardOp) -> anyhow::Result<Option<String>> {
