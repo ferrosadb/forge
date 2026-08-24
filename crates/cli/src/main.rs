@@ -3967,7 +3967,7 @@ impl FerrosaMemoryConfig {
 }
 
 /// Read config from user's config directory if it exists.
-fn ferrosa_memory_config() -> Option<FerrosaMemoryConfig> {
+pub(crate) fn ferrosa_memory_config() -> Option<FerrosaMemoryConfig> {
     let path = dirs::home_dir()?.join(".config/ferrosa-memory.toml");
     let content = std::fs::read_to_string(path).ok()?;
     let table: toml::Table = content.parse().ok()?;
@@ -4043,7 +4043,7 @@ impl FerrosaMemoryConfig {
 
 /// The resolved transport the CLI/MCP tool should use for this call,
 /// with a short human-readable label for log/error messages.
-enum ResolvedTransport {
+pub(crate) enum ResolvedTransport {
     Http {
         transport: forge_fmem_client::HttpTransport,
         label: String,
@@ -4080,7 +4080,7 @@ impl ResolvedTransport {
 /// We DO NOT silently fall back to "extract-only" — a tool named
 /// `ingest` that doesn't ingest is a footgun (a prior design mistake
 /// this function exists to close).
-fn resolve_transport_for_ingest(
+pub(crate) fn resolve_transport_for_ingest(
     mcp_bin: Option<std::path::PathBuf>,
     config: &Option<FerrosaMemoryConfig>,
 ) -> anyhow::Result<ResolvedTransport> {

@@ -79,18 +79,43 @@ fn execute_run(
         let dry = MockTransport::panicking();
         skill_ingest::run(config, &dry).map_err(|e| anyhow::anyhow!("{e}"))?
     } else {
-        let argv = parse_server_command(server.as_deref());
-        let stdio_config = StdioConfig {
-            command: argv,
-            ..Default::default()
+        // Prefer a server that is ALREADY RUNNING.
+        //
+        // Spawning is the fallback, not the default. On a machine with a live
+        // fmem, spawning a second one points two servers at the same cluster:
+        // they both run consolidation, contend for the same partitions, and
+        // the taxonomy phase times out against a cluster that is serving the
+        // first server perfectly well. The corpus path has always used the
+        // configured HTTP endpoint; this brings skills in line with it.
+        // Only when the caller did not name a server explicitly: an explicit
+        // --server is a deliberate choice and must not be silently ignored.
+        let http = if server.is_none() {
+            crate::ferrosa_memory_config()
+        } else {
+            None
         };
-        let transport =
-            StdioTransport::spawn(stdio_config).map_err(|e| anyhow::anyhow!("spawn fmem: {e}"))?;
-        // Best-effort handshake — strict protocol version. Fail loud if
-        // the server advertises a version forge doesn't recognize.
-        initialize(&transport, ExpectedProtocolVersion::Strict)
-            .map_err(|e| anyhow::anyhow!("fmem initialize: {e}"))?;
-        skill_ingest::run(config, &transport).map_err(|e| anyhow::anyhow!("{e}"))?
+        match crate::resolve_transport_for_ingest(None, &http) {
+            Ok(crate::ResolvedTransport::Http { transport, label }) => {
+                eprintln!("[skill-ingest] using {label}");
+                initialize(&transport, ExpectedProtocolVersion::Strict)
+                    .map_err(|e| anyhow::anyhow!("fmem initialize: {e}"))?;
+                skill_ingest::run(config, &transport).map_err(|e| anyhow::anyhow!("{e}"))?
+            }
+            _ => {
+                let argv = parse_server_command(server.as_deref());
+                let stdio_config = StdioConfig {
+                    command: argv,
+                    ..Default::default()
+                };
+                let transport = StdioTransport::spawn(stdio_config)
+                    .map_err(|e| anyhow::anyhow!("spawn fmem: {e}"))?;
+                // Best-effort handshake — strict protocol version. Fail loud if
+                // the server advertises a version forge doesn't recognize.
+                initialize(&transport, ExpectedProtocolVersion::Strict)
+                    .map_err(|e| anyhow::anyhow!("fmem initialize: {e}"))?;
+                skill_ingest::run(config, &transport).map_err(|e| anyhow::anyhow!("{e}"))?
+            }
+        }
     };
 
     Ok(summary)

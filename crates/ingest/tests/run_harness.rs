@@ -59,6 +59,16 @@ fn config(root: PathBuf) -> RunConfig {
     }
 }
 
+/// The readiness probe every run makes before it writes anything.
+///
+/// A cold fmem answers the MCP handshake immediately and connects to its
+/// cluster afterwards, so the run waits until a read actually works. Every
+/// script therefore starts with this; one that omits it asserts the run
+/// writes into a server it never checked.
+fn ok_ready() -> ScriptedResponse {
+    ScriptedResponse::Ok(json!({ "counts": {}, "total": 0 }))
+}
+
 fn ok_created() -> ScriptedResponse {
     ScriptedResponse::Ok(json!({
         "action": "created",
@@ -152,8 +162,9 @@ fn happy_path_three_skills_no_hierarchy() {
     );
 
     let mock = MockTransport::new();
-    // Phase A: no hierarchy → no ensure_parent_tag calls.
-    // Phase B: three ingest_skill calls.
+    mock.expect_call("tools/call", ok_ready()); // readiness probe
+                                                // Phase A: no hierarchy → no ensure_parent_tag calls.
+                                                // Phase B: three ingest_skill calls.
     mock.expect_call("tools/call", ok_created()); // refactor (sorted by path comes first under task-level)
     mock.expect_call("tools/call", ok_created()); // tdd
     mock.expect_call("tools/call", ok_created()); // rust
@@ -192,8 +203,9 @@ fn phase_c_repass_uses_server_missing_prereqs_signal() {
     );
 
     let mock = MockTransport::new();
-    // Phase B (two ingest calls, sorted by path): tdd (with missing
-    // prereq), then unit-testing (all clean).
+    mock.expect_call("tools/call", ok_ready()); // readiness probe
+                                                // Phase B (two ingest calls, sorted by path): tdd (with missing
+                                                // prereq), then unit-testing (all clean).
     mock.expect_call("tools/call", ok_created_missing(vec!["unit-testing"])); // tdd
     mock.expect_call("tools/call", ok_created()); // unit-testing
                                                   // Phase C: tdd's Phase B outcome had a non-empty list, so it gets
@@ -225,7 +237,8 @@ fn phase_c_skipped_when_no_missing_prereqs_reported() {
     );
 
     let mock = MockTransport::new();
-    // Phase B: ok_created (empty missing list — prereq already in fmem).
+    mock.expect_call("tools/call", ok_ready()); // readiness probe
+                                                // Phase B: ok_created (empty missing list — prereq already in fmem).
     mock.expect_call("tools/call", ok_created());
     // Phase D only — no re-pass.
     mock.expect_call("tools/call", ok_verify(vec!["task-level"], vec![]));
@@ -251,6 +264,7 @@ fn verification_failure_exits_4() {
     );
 
     let mock = MockTransport::new();
+    mock.expect_call("tools/call", ok_ready()); // readiness probe
     mock.expect_call("tools/call", ok_created()); // ingest_skill
                                                   // Phase D sees the missing prereq.
     mock.expect_call(
@@ -282,6 +296,7 @@ fn missing_expected_tag_fails_verification() {
     );
 
     let mock = MockTransport::new();
+    mock.expect_call("tools/call", ok_ready()); // readiness probe
     mock.expect_call("tools/call", ok_created()); // ingest_skill
     mock.expect_call("tools/call", ok_verify(vec!["task-level"], vec![]));
 
@@ -310,7 +325,8 @@ fn hierarchy_phase_a_wired() {
     fx.hierarchy("task-level: quality\n");
 
     let mock = MockTransport::new();
-    // Phase A: one ensure_parent_tag.
+    mock.expect_call("tools/call", ok_ready()); // readiness probe
+                                                // Phase A: one ensure_parent_tag.
     mock.expect_call("tools/call", ok_parent_tag_created());
     // Phase B: two ingest_skill.
     mock.expect_call("tools/call", ok_created());
@@ -340,7 +356,8 @@ fn filter_matches_zero_warns_exits_clean() {
     cfg.filter = Some("nonexistent*".into());
 
     let mock = MockTransport::new();
-    // Filter matches nothing — no ingest/verify calls.
+    mock.expect_call("tools/call", ok_ready()); // readiness probe
+                                                // Filter matches nothing — no ingest/verify calls.
     let summary = run(cfg, &mock).unwrap();
     assert_eq!(summary.skills_created, 0);
     assert_eq!(summary.skills_filtered_out, 1);
@@ -378,6 +395,7 @@ fn ingest_transport_error_counts_as_failure() {
     );
 
     let mock = MockTransport::new();
+    mock.expect_call("tools/call", ok_ready()); // readiness probe
     mock.expect_call(
         "tools/call",
         ScriptedResponse::ToolError {
@@ -422,6 +440,7 @@ fn force_flag_omits_content_hash_on_the_wire() {
     cfg.force = true;
 
     let mock = MockTransport::new();
+    mock.expect_call("tools/call", ok_ready()); // readiness probe
     mock.expect_call_with(
         "tools/call",
         |p| {
