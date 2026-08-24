@@ -52,6 +52,20 @@ pub struct Entity {
     pub entity_type: String,
     pub context: String,
 
+    /// Where this entity came from, as an absolute path.
+    ///
+    /// Sent to ferrosa-memory as `attrs.source_path`, which is what its tier
+    /// plane derives a tier from: a path under a curated root is curated
+    /// material, and an entity with no path sits at Data whatever it contains.
+    ///
+    /// ABSOLUTE, not relative. The rules are keyed on roots resolved through
+    /// an alias table, and a relative path like `corpus/x.md` only matches if
+    /// someone happened to register that exact spelling. The absolute path is
+    /// what the file actually is, and it matches the alias for the checkout it
+    /// lives in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+
     /// Full file body for `file` entities; `None` for all other entity types.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_text: Option<String>,
@@ -144,6 +158,8 @@ pub fn emit_file_entity(path: &Path, source: &SourceBuffer) -> Entity {
         name: path_str.clone(),
         entity_type: "file".to_string(),
         context: format!("Source file: {path_str}"),
+        // A file entity IS its path, so it always knows where it came from.
+        source_path: Some(path_str.clone()),
         source_text: source.text.clone(),
         sha256: Some(source.sha256.clone()),
         // Byte ranges are omitted for file entities; start/end line cover the whole file.
@@ -2299,6 +2315,7 @@ namespace MyApp
     #[test]
     fn entity_schema_roundtrips_json() {
         let original = Entity {
+            source_path: None,
             id: "test-id-123".to_string(),
             name: "my_function".to_string(),
             entity_type: "function".to_string(),

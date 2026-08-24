@@ -256,7 +256,14 @@ fn parse_files<'a>(
 ) -> Vec<(Skill, &'a SkillFile)> {
     let mut out = Vec::with_capacity(files.len());
     for f in files {
-        match parse::parse(&f.bytes, &f.category) {
+        // The walker is the only place that knows where the file is, so it is
+        // the only place that can tell fmem. Canonicalised so the tier rules,
+        // which match on a root through an alias table, see the same spelling
+        // whatever relative path the run was started from.
+        let source_path = std::fs::canonicalize(&f.path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| f.path.to_string_lossy().into_owned());
+        match parse::parse_from(&f.bytes, &f.category, Some(source_path)) {
             Ok(skill) => {
                 if skill.steps_empty {
                     summary

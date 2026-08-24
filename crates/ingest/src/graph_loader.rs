@@ -483,6 +483,13 @@ fn entity_to_wire_entity(e: &Entity) -> WireEntity {
     if let Some(v) = e.extractor_schema_version {
         attrs.insert("extractor_schema_version".into(), v.into());
     }
+    // Where it came from. The server derives its TIER from this, so an entity
+    // that ships without one is filed as raw capture no matter how curated the
+    // file it came from was.
+    if let Some(path) = &e.source_path {
+        attrs.insert("source_path".into(), path.clone().into());
+    }
+
     // source_text is intentionally excluded from attrs — it is a top-level
     // field on `file` entities in the server schema.  sha256 likewise.
     // T-future: once the server schema is confirmed, move these to

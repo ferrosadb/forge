@@ -43,6 +43,12 @@ pub struct Skill {
     pub supplementary_files: Vec<String>,
     /// Parsed steps from the body.
     pub steps: Vec<Step>,
+    /// Absolute path of the SKILL.md this was parsed from.
+    ///
+    /// Sent to fmem as `source_path`, which is what its tier plane derives a
+    /// tier from. Skills are the Wisdom tier's whole population; without this
+    /// they arrive with no origin and sit at Data alongside session exhaust.
+    pub source_path: Option<String>,
     /// Raw frontmatter YAML bytes, captured for hashing.
     pub frontmatter_bytes: Vec<u8>,
     /// Raw body markdown bytes, captured for hashing.
@@ -151,6 +157,19 @@ struct Frontmatter {
 /// `category` comes from the walker (the immediate child of the skill
 /// root); the parser does not derive it from the file path.
 pub fn parse(bytes: &[u8], category: &str) -> Result<Skill, ParseError> {
+    parse_from(bytes, category, None)
+}
+
+/// Parse, recording where the file came from.
+///
+/// Split from [`parse`] so the many call sites that only have bytes keep
+/// working, while the walker -- the one place that knows the path -- can pass
+/// it. A skill with no path still ingests; it just cannot be tiered.
+pub fn parse_from(
+    bytes: &[u8],
+    category: &str,
+    source_path: Option<String>,
+) -> Result<Skill, ParseError> {
     if bytes.len() > MAX_FILE_SIZE_BYTES {
         return Err(ParseError::TooLarge {
             actual: bytes.len(),
@@ -180,6 +199,7 @@ pub fn parse(bytes: &[u8], category: &str) -> Result<Skill, ParseError> {
 
     Ok(Skill {
         name,
+        source_path,
         category: category.to_string(),
         description,
         argument_hint: fm.argument_hint.map(ArgumentHint::into_string),
