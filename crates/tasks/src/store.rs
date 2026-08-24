@@ -485,13 +485,17 @@ impl TaskStore {
     /// As `list_tasks`, but reporting how many matched and whether the read was
     /// cut short, so a caller can tell a complete answer from a window.
     pub fn list_tasks_paged(&self, filter: TaskFilter, offset: usize) -> Result<FetchedTasks> {
-        let limit = filter.limit.unwrap_or(100);
+        let limit = filter.limit.unwrap_or_else(default_page_limit);
         // Ask for everything the bound allows; the window is applied here.
         let mut unbounded = filter;
         unbounded.limit = Some(MAX_FETCH_ROWS);
         let mut tasks = self.list_tasks(unbounded)?;
         let truncated = tasks.len() >= MAX_FETCH_ROWS;
         let total = tasks.len();
+        // Most important first. `list_tasks` sorts newest-first, which answers
+        // "what changed recently"; a paged read is asking "what should I do
+        // next", and the page boundary is what makes the total order matter.
+        sort_by_priority(&mut tasks);
         let tasks = if offset >= tasks.len() {
             Vec::new()
         } else {
@@ -849,6 +853,58 @@ fn format_set_text(items: &[String]) -> String {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Rows returned when the caller does not say how many they want.
+///
+/// Ten, not fifty. The common question is "what should I do next", and the
+/// answer to that is a shortlist an agent can act on — fifty rows is mostly
+/// tool-result tokens the caller will never read. Anyone who wants more can
+/// ask for more, and `page_hint` tells them how.
+pub const fn default_page_limit() -> usize {
+    10
+}
+
+/// Most important first: priority desc, then newest, then task_id.
+///
+/// `sort_newest_first` answers "what changed recently". This answers "what
+/// should I do next", which is a different question — under recency ordering a
+/// P90 blocker filed yesterday loses to a P30 note filed this morning.
+///
+/// The task_id tiebreak is not cosmetic. Paging splits one ordering across
+/// several reads, so any pair left in an unspecified order can swap between
+/// calls, and a task that swaps across a page boundary is shown twice or never
+/// — the same reasoning `sort_newest_first` documents.
+pub(crate) fn sort_by_priority(tasks: &mut [Task]) {
+    tasks.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
+}
+
+/// How to ask for the rest, when there is a rest.
+///
+/// Returns `None` for a complete answer so a finished result set does not
+/// invite a pointless follow-up call.
+///
+/// This exists because a truncated answer that does not announce itself reads
+/// as a complete one — the failure this board already hit once, when a LIMIT
+/// silently dropped recent tasks and an agent could not see its own write.
+/// `truncated` covers the MAX_FETCH_ROWS bound; this covers the caller's own
+/// page, which is far more likely to be hit.
+pub fn page_hint(total: usize, offset: usize, returned: usize) -> Option<String> {
+    let shown_through = offset.saturating_add(returned);
+    if shown_through >= total || returned == 0 {
+        return None;
+    }
+    Some(format!(
+        "Showing {}-{} of {total}. {} more — call again with offset={shown_through} for the next page.",
+        offset + 1,
+        shown_through,
+        total - shown_through,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,5 +1036,119 @@ mod tests {
             first_line(CREATE_TASKS_TABLE),
             "CREATE TABLE IF NOT EXISTS agent_memory.tasks ("
         );
+    }
+
+    /// Build a task with just the fields ordering depends on.
+    fn task_at(task_id: &str, priority: i32, created_at: i64) -> Task {
+        let mut row = valid_row();
+        row.columns[0] = Some(CqlValue::Text(task_id.into()));
+        row.columns[6] = Some(CqlValue::Int(priority));
+        row.columns[16] = Some(CqlValue::BigInt(created_at));
+        parse_task_row(row).expect("valid row")
+    }
+
+    /// "What should I do next" must answer by IMPORTANCE, not by recency.
+    ///
+    /// The board only had `sort_newest_first`, so a P90 blocker filed
+    /// yesterday lost to a P30 note filed this morning — the agent asking for
+    /// the most relevant next work got the most recent instead.
+    #[test]
+    fn priority_order_puts_the_most_important_first() {
+        let mut tasks = vec![
+            task_at("t_low_new", 30, 2_000),
+            task_at("t_high_old", 90, 1_000),
+            task_at("t_mid", 50, 1_500),
+        ];
+        sort_by_priority(&mut tasks);
+
+        let ids: Vec<&str> = tasks.iter().map(|t| t.task_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["t_high_old", "t_mid", "t_low_new"],
+            "highest priority first, regardless of age"
+        );
+    }
+
+    /// Equal priorities fall back to newest first, so the ordering still says
+    /// something useful rather than being arbitrary within a priority band.
+    #[test]
+    fn equal_priority_falls_back_to_newest_first() {
+        let mut tasks = vec![task_at("t_older", 70, 1_000), task_at("t_newer", 70, 2_000)];
+        sort_by_priority(&mut tasks);
+
+        let ids: Vec<&str> = tasks.iter().map(|t| t.task_id.as_str()).collect();
+        assert_eq!(ids, vec!["t_newer", "t_older"]);
+    }
+
+    /// The order must be TOTAL. Paging splits one ordering across several
+    /// reads, so any pair left in an unspecified order can swap between calls
+    /// — which would show a task twice on one page and never on the next. The
+    /// existing `sort_newest_first` breaks ties on task_id for exactly this
+    /// reason; priority ordering needs the same guarantee.
+    #[test]
+    fn identical_priority_and_timestamp_still_have_a_stable_total_order() {
+        let ordering = |ids: [&str; 3]| {
+            let mut tasks = vec![
+                task_at(ids[0], 70, 1_000),
+                task_at(ids[1], 70, 1_000),
+                task_at(ids[2], 70, 1_000),
+            ];
+            sort_by_priority(&mut tasks);
+            tasks
+                .iter()
+                .map(|t| t.task_id.clone())
+                .collect::<Vec<String>>()
+        };
+
+        // Same three tasks presented in different input orders must come out
+        // the same way every time.
+        assert_eq!(
+            ordering(["t_b", "t_a", "t_c"]),
+            ordering(["t_c", "t_b", "t_a"]),
+            "tie-breaking must not depend on input order"
+        );
+        assert_eq!(ordering(["t_b", "t_a", "t_c"]), vec!["t_a", "t_b", "t_c"]);
+    }
+
+    /// When more matched than were returned, the caller is TOLD, in terms it
+    /// can act on directly. A truncated answer that does not announce itself
+    /// reads as a complete one.
+    #[test]
+    fn a_partial_page_tells_the_caller_how_to_get_the_rest() {
+        let hint = page_hint(47, 0, 10).expect("a partial page must hint");
+        assert!(
+            hint.contains("47"),
+            "the hint must state the true total, got: {hint}"
+        );
+        assert!(
+            hint.contains("offset=10"),
+            "the hint must give the exact next offset, got: {hint}"
+        );
+    }
+
+    /// Mid-way through the board the hint advances rather than repeating the
+    /// first page.
+    #[test]
+    fn the_hint_advances_with_the_offset() {
+        let hint = page_hint(47, 10, 10).expect("still more to come");
+        assert!(
+            hint.contains("offset=20"),
+            "next offset must follow this page, got: {hint}"
+        );
+    }
+
+    /// A complete answer must NOT invite a pointless follow-up call.
+    #[test]
+    fn a_complete_result_set_has_no_hint() {
+        assert!(page_hint(10, 0, 10).is_none(), "exactly complete");
+        assert!(page_hint(7, 0, 7).is_none(), "fewer than a full page");
+        assert!(page_hint(47, 40, 7).is_none(), "final page");
+        assert!(page_hint(0, 0, 0).is_none(), "empty board");
+    }
+
+    /// Asking for "the next things" should cost ten rows, not fifty.
+    #[test]
+    fn the_default_page_is_ten() {
+        assert_eq!(default_page_limit(), 10);
     }
 }
