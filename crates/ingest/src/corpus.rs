@@ -50,6 +50,9 @@ struct CorpusDoc {
     category: String,
     /// Relative path from corpus root parent (e.g. "corpus/functional-programming/foo.md")
     rel_path: String,
+    /// Where the file actually is. Becomes `attrs.source_path`, which is what
+    /// the server tiers on.
+    source_path: String,
     summary_section: Section,
     sections: Vec<Section>,
 }
@@ -84,6 +87,14 @@ fn parse_corpus_file(path: &Path) -> Result<Option<CorpusDoc>> {
         .unwrap_or_default();
 
     let rel_path = format!("corpus/{category}/{filename}");
+    // Absolute, and canonicalised where possible: the tier rules match on a
+    // root resolved through an alias table, and a relative path only matches
+    // if someone registered that exact spelling. Falls back to the path as
+    // given rather than dropping it -- an un-canonicalisable path still tiers
+    // if it happens to sit under a known root.
+    let source_path = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned());
 
     let mut lines: Vec<&str> = raw.lines().collect();
 
@@ -163,6 +174,7 @@ fn parse_corpus_file(path: &Path) -> Result<Option<CorpusDoc>> {
         publisher,
         category,
         rel_path,
+        source_path,
         summary_section,
         sections,
     }))
@@ -204,6 +216,7 @@ fn build_doc_graph(doc: &CorpusDoc) -> (Vec<Entity>, Vec<Edge>) {
         entity_type: "document".to_string(),
         context: l1_context,
         extractor_schema_version: Some(EXTRACTOR_SCHEMA_VERSION),
+        source_path: Some(doc.source_path.clone()),
         ..Default::default()
     });
 
@@ -223,6 +236,7 @@ fn build_doc_graph(doc: &CorpusDoc) -> (Vec<Entity>, Vec<Edge>) {
         entity_type: "section".to_string(),
         context: l2_context,
         extractor_schema_version: Some(EXTRACTOR_SCHEMA_VERSION),
+        source_path: Some(doc.source_path.clone()),
         ..Default::default()
     });
 
@@ -254,6 +268,7 @@ fn build_doc_graph(doc: &CorpusDoc) -> (Vec<Entity>, Vec<Edge>) {
             entity_type: "section".to_string(),
             context: l3_context,
             extractor_schema_version: Some(EXTRACTOR_SCHEMA_VERSION),
+            source_path: Some(doc.source_path.clone()),
             ..Default::default()
         });
 
@@ -429,6 +444,7 @@ mod tests {
     #[test]
     fn test_build_doc_graph_structure() {
         let doc = CorpusDoc {
+            source_path: "/tmp/corpus/test/doc.md".to_owned(),
             title: "Test Book".to_string(),
             author: "Test Author".to_string(),
             year: "2024".to_string(),
