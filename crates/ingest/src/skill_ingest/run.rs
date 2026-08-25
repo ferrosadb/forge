@@ -22,7 +22,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use forge_fmem_client::{
     ensure_parent_tag, ingest_skill, verify_skill, EnsureParentTagArgs, IngestSkillAction,
@@ -143,6 +143,10 @@ pub enum RunError {
     Walk(walk::WalkError),
     Collision(collision::CollisionError),
     Plan(taxonomy::PlanError),
+    /// fmem was reachable but never able to serve. Its own variant, because
+    /// "the cluster is still starting" and "your catalog is malformed" want
+    /// different responses from whoever ran this.
+    NotReady(String),
 }
 
 impl std::fmt::Display for RunError {
@@ -151,6 +155,7 @@ impl std::fmt::Display for RunError {
             Self::Walk(e) => write!(f, "walk error: {e}"),
             Self::Collision(e) => write!(f, "{e}"),
             Self::Plan(e) => write!(f, "{e}"),
+            Self::NotReady(reason) => write!(f, "fmem never became ready: {reason}"),
         }
     }
 }
@@ -221,6 +226,13 @@ pub fn run<T: Transport>(config: RunConfig, transport: &T) -> Result<Summary, Ru
     }
 
     // --- Phase A: taxonomy seed ---
+    // Before anything is written. A cold fmem answers the handshake straight
+    // away and connects to its cluster afterwards, so firing phase A at it
+    // reports failures for a cluster that is fine.
+    if let Err(reason) = wait_until_ready(transport, &config) {
+        return Err(RunError::NotReady(reason));
+    }
+
     run_phase_a(transport, &plan, &config, &mut summary);
     if summary.taxonomy_edges_failed > 0 {
         summary.duration_ms = start.elapsed().as_millis();
@@ -256,7 +268,14 @@ fn parse_files<'a>(
 ) -> Vec<(Skill, &'a SkillFile)> {
     let mut out = Vec::with_capacity(files.len());
     for f in files {
-        match parse::parse(&f.bytes, &f.category) {
+        // The walker is the only place that knows where the file is, so it is
+        // the only place that can tell fmem. Canonicalised so the tier rules,
+        // which match on a root through an alias table, see the same spelling
+        // whatever relative path the run was started from.
+        let source_path = std::fs::canonicalize(&f.path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| f.path.to_string_lossy().into_owned());
+        match parse::parse_from(&f.bytes, &f.category, Some(source_path)) {
             Ok(skill) => {
                 if skill.steps_empty {
                     summary
@@ -345,6 +364,56 @@ impl Matcher {
         }
         true
     }
+}
+
+// ---------------------------------------------------------------------------
+// Readiness
+// ---------------------------------------------------------------------------
+
+/// How long to wait for a freshly spawned fmem to be able to serve.
+///
+/// A cold server answers the MCP handshake immediately and connects to its
+/// cluster in the background, so "the process started" is not "the tools
+/// work". Without this the run fired all 17 taxonomy edges into a server that
+/// was still connecting and reported 17 failures for a cluster that was
+/// perfectly healthy.
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const READY_POLL: Duration = Duration::from_millis(250);
+
+/// Wait until fmem can actually answer a read, or say plainly that it cannot.
+///
+/// Probes with `count_entities_by_type`, which touches the cluster and
+/// changes nothing. Only a "connection not yet established" answer is waited
+/// out; anything else means the probe is uninformative here and the run
+/// proceeds. The timeout message carries the last error so a cluster that is
+/// down is distinguishable from one that is merely slow.
+fn wait_until_ready<T: Transport>(transport: &T, config: &RunConfig) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let mut last = String::from("no attempt completed");
+    while started.elapsed() < READY_TIMEOUT {
+        let args = forge_fmem_client::CountEntitiesByTypeArgs {
+            session_id: config.session_id.clone(),
+        };
+        match forge_fmem_client::count_entities_by_type(transport, args) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                last = e.to_string();
+                // ONLY a not-ready answer is worth waiting out. Any other
+                // error means this probe cannot tell us anything -- a mock
+                // transport, a server too old to have the tool -- so proceed
+                // and let the real calls report their own failures. Vetoing
+                // on an error the probe does not understand would turn a
+                // readiness check into a second failure mode rather than a fix.
+                if !last.contains("not yet established") {
+                    return Ok(());
+                }
+            }
+        }
+        std::thread::sleep(READY_POLL);
+    }
+    Err(format!(
+        "fmem did not become ready within {READY_TIMEOUT:?}: {last}"
+    ))
 }
 
 // ---------------------------------------------------------------------------

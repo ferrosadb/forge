@@ -53,6 +53,10 @@ pub fn build_ingest_args(
         // don't lie on the wire.
         completion_criteria: None,
         content_hash: Some(hash::content_hash(skill, supplementary)),
+        // Where the SKILL.md lives. fmem tiers on this: skills are the whole
+        // population of the Wisdom tier, and one that arrives without a path
+        // is filed as raw capture.
+        source_path: skill.source_path.clone(),
         session_id,
     }
 }
@@ -81,10 +85,36 @@ mod tests {
 
     fn sup(name: &str, bytes: &[u8]) -> ResolvedSupplementary {
         ResolvedSupplementary {
+            inlined: true,
             declared: name.into(),
             path: PathBuf::from(name),
             bytes: bytes.to_vec(),
         }
+    }
+
+    /// The path has to reach the wire, or fmem tiers the skill as raw capture.
+    ///
+    /// Skills are the whole population of the Wisdom tier. A regression here
+    /// is silent: ingest succeeds, the skill is searchable, and it simply sits
+    /// in the wrong tier for anyone deciding what to share.
+    #[test]
+    fn the_source_path_reaches_the_wire() {
+        let mut skill = parse_skill("name: tdd\ndescription: d\n", "# Steps\n", "task-level");
+        skill.source_path = Some("/Users/b/src/research/skills/tdd/SKILL.md".into());
+        let args = build_ingest_args(&skill, &[], None);
+        assert_eq!(
+            args.source_path.as_deref(),
+            Some("/Users/b/src/research/skills/tdd/SKILL.md"),
+        );
+    }
+
+    /// A skill parsed from bytes alone has no path, and must send none rather
+    /// than an empty string -- fmem records a source only when one is stated,
+    /// and "" would file the skill under a root of "".
+    #[test]
+    fn a_skill_with_no_known_path_sends_none() {
+        let skill = parse_skill("name: tdd\ndescription: d\n", "# Steps\n", "task-level");
+        assert_eq!(build_ingest_args(&skill, &[], None).source_path, None);
     }
 
     #[test]

@@ -3147,7 +3147,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
     register_tool!(
         server,
         "task_list",
-        "List tasks with optional filtering by status, assignee, and priority range.",
+        "List tasks, MOST IMPORTANT FIRST (priority desc, then newest). Returns the top 10 by default and reports the total; when more match, the response carries a `next_page` line telling you the exact offset to ask for. Filter by status, assignee, and priority range.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3155,7 +3155,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                 "assignee":     {"type": "string",  "description": "Filter by assignee name"},
                 "priority_gte": {"type": "integer", "description": "Minimum priority (inclusive)"},
                 "priority_lte": {"type": "integer", "description": "Maximum priority (inclusive)"},
-                "limit":        {"type": "integer", "description": "Max results (default 50). Rows are returned NEWEST FIRST, so a limit keeps the most recent work rather than an arbitrary slice."},
+                "limit":        {"type": "integer", "description": "Rows per page (default 10). Rows come back HIGHEST PRIORITY FIRST, so a page is the most important outstanding work, not an arbitrary slice. When more match than fit, `next_page` in the response gives the offset for the rest."},
                 "offset":       {"type": "integer", "description": "Skip this many rows before the limit, for paging through a long board."},
                 "full":         {"type": "boolean", "description": "Include body, result and metadata on every row. Off by default: a few hundred full rows exceed the tool-result token limit. Use task_get for the detail of a specific task."},
                 "cql_host":     {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"},
@@ -3195,6 +3195,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                 .list_tasks_paged(filter, offset)
                 .map_err(|e| e.to_string())?;
             let full = args.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
+            let page_len = page.tasks.len();
             let rows: Vec<_> = if full {
                 page.tasks
             } else {
@@ -3203,12 +3204,19 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
             // Report the window explicitly. A capped read that says so is usable;
             // one that does not is worse than an error -- the previous behaviour
             // silently omitted recent tasks and looked like a complete answer.
-            let payload = serde_json::json!({
+            // Tell the caller when it is holding a window rather than the
+            // whole answer, in terms it can act on without guessing the
+            // parameter name. A truncated result that does not announce
+            // itself reads as a complete one.
+            let mut payload = serde_json::json!({
                 "tasks": rows,
                 "total": page.total,
                 "offset": offset,
                 "truncated": page.truncated,
             });
+            if let Some(hint) = forge_tasks::page_hint(page.total, offset, page_len) {
+                payload["next_page"] = serde_json::Value::String(hint);
+            }
             finish_task(&store, &args, &payload)
         }
     );
@@ -3959,7 +3967,7 @@ impl FerrosaMemoryConfig {
 }
 
 /// Read config from user's config directory if it exists.
-fn ferrosa_memory_config() -> Option<FerrosaMemoryConfig> {
+pub(crate) fn ferrosa_memory_config() -> Option<FerrosaMemoryConfig> {
     let path = dirs::home_dir()?.join(".config/ferrosa-memory.toml");
     let content = std::fs::read_to_string(path).ok()?;
     let table: toml::Table = content.parse().ok()?;
@@ -4035,7 +4043,7 @@ impl FerrosaMemoryConfig {
 
 /// The resolved transport the CLI/MCP tool should use for this call,
 /// with a short human-readable label for log/error messages.
-enum ResolvedTransport {
+pub(crate) enum ResolvedTransport {
     Http {
         transport: forge_fmem_client::HttpTransport,
         label: String,
@@ -4072,7 +4080,7 @@ impl ResolvedTransport {
 /// We DO NOT silently fall back to "extract-only" — a tool named
 /// `ingest` that doesn't ingest is a footgun (a prior design mistake
 /// this function exists to close).
-fn resolve_transport_for_ingest(
+pub(crate) fn resolve_transport_for_ingest(
     mcp_bin: Option<std::path::PathBuf>,
     config: &Option<FerrosaMemoryConfig>,
 ) -> anyhow::Result<ResolvedTransport> {

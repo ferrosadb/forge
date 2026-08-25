@@ -53,6 +53,13 @@ pub struct IngestSkillArgs {
     pub completion_criteria: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
+    /// Absolute path of the SKILL.md this came from.
+    ///
+    /// fmem derives the skill's TIER from this. Omitted rather than sent
+    /// empty when unknown: fmem records a source only when one is stated, and
+    /// a blank path would file the skill under a root of "".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
     /// Session to record as `ingested_by_session`. fmem accepts a UUID
     /// string or the literal `"default"` (see
     /// `ferrosa-memory-core/src/dispatch.rs`'s tool description).
@@ -223,6 +230,7 @@ fn parse_response(raw: serde_json::Value) -> Result<IngestSkillResponse, Error> 
 #[cfg(test)]
 fn minimal_args(name: &str) -> IngestSkillArgs {
     IngestSkillArgs {
+        source_path: None,
         name: name.to_string(),
         category: "task-level".to_string(),
         description: format!("{name} skill"),
@@ -413,6 +421,7 @@ mod tests {
             })),
         );
         let args = IngestSkillArgs {
+            source_path: None,
             name: "tdd".into(),
             category: "task-level".into(),
             description: "do tdd".into(),
