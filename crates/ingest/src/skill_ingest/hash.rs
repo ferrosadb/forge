@@ -31,6 +31,12 @@ pub fn content_hash(skill: &Skill, supplementary: &[ResolvedSupplementary]) -> S
     for sup in supplementary {
         hasher.update(sup.declared.as_bytes());
         hasher.update(b"\0");
+        // Whether it was inlined is part of the identity. A file that moves
+        // out of the skill directory stops contributing its content, and the
+        // hash has to change or the skill reads as unchanged while what it
+        // carries has shrunk.
+        hasher.update(if sup.inlined { b"i" } else { b"r" });
+        hasher.update(b"\0");
         hasher.update(&sup.bytes);
         hasher.update(b"\0");
     }
@@ -54,6 +60,7 @@ mod tests {
 
     fn sup(name: &str, bytes: &[u8]) -> ResolvedSupplementary {
         ResolvedSupplementary {
+            inlined: true,
             declared: name.to_string(),
             path: PathBuf::from(name),
             bytes: bytes.to_vec(),

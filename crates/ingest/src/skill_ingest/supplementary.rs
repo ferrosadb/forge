@@ -22,7 +22,19 @@ pub struct ResolvedSupplementary {
     /// Canonical absolute path.
     pub path: PathBuf,
     /// File bytes — read eagerly so downstream hashing doesn't re-stat.
+    ///
+    /// Empty when `inlined` is false: the file exists but sits outside the
+    /// skill, so it is REFERENCED rather than pulled in.
     pub bytes: Vec<u8>,
+    /// Whether the content was taken into this skill.
+    ///
+    /// False for a file outside the skill directory. Those are real
+    /// cross-references — a skill citing a sibling skill's conventions, or a
+    /// corpus distillation it is built on — and they used to fail the whole
+    /// skill. Recording the reference and moving on keeps the skill, keeps the
+    /// pointer, and avoids copying a corpus document into a skill, which would
+    /// duplicate Information-tier text into Wisdom.
+    pub inlined: bool,
 }
 
 #[derive(Debug)]
@@ -106,14 +118,25 @@ fn resolve_one(
         source: e,
     })?;
 
+    // Outside the skill: keep the pointer, do not take the content.
+    //
+    // NOT an error. The guard exists to stop a skill inlining arbitrary files,
+    // and it still does -- nothing outside is read. But a skill that cites a
+    // sibling's conventions or the corpus document it was distilled from is
+    // making a legitimate reference, and failing the whole skill over it lost
+    // 3 of 98 in the real catalog.
     if !resolved.starts_with(skill_dir) {
-        return Err(SupplementaryError::EscapesSkillDir {
+        return Ok(ResolvedSupplementary {
             declared: declared.to_string(),
-            resolved,
-            skill_dir: skill_dir.to_path_buf(),
+            path: resolved,
+            bytes: Vec::new(),
+            inlined: false,
         });
     }
 
+    // A declared file that cannot be READ stays fatal. That is a typo or a
+    // deleted file, and passing it silently would let a skill lose half its
+    // content without anyone noticing.
     let bytes = fs::read(&resolved).map_err(|e| SupplementaryError::Io {
         declared: declared.to_string(),
         source: e,
@@ -123,6 +146,7 @@ fn resolve_one(
         declared: declared.to_string(),
         path: resolved,
         bytes,
+        inlined: true,
     })
 }
 
@@ -170,15 +194,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_parent_escape() {
+    /// A path outside the skill is REFERENCED, never read.
+    ///
+    /// This used to be an error, which failed the whole skill and lost 3 of
+    /// 98 in the real catalog over legitimate cross-references. The property
+    /// that matters is unchanged and is what this now asserts: not one byte
+    /// from outside the skill directory is taken in.
+    #[test]
+    fn a_path_above_the_skill_is_referenced_and_never_read() {
         let tmp = TempDir::new().unwrap();
         let dir = setup_skill_dir(&tmp);
-        // Create a file above the skill dir.
         let above = tmp.path().join("secrets.md");
         fs::write(&above, "sensitive").unwrap();
 
-        let err = resolve(&dir, &["../../../secrets.md".to_string()]).unwrap_err();
-        assert!(matches!(err, SupplementaryError::EscapesSkillDir { .. }));
+        let out =
+            resolve(&dir, &["../../../secrets.md".to_string()]).expect("a reference, not an error");
+        let sup = out.first().expect("one entry");
+        assert!(!sup.inlined, "content outside the skill was inlined");
+        assert!(
+            sup.bytes.is_empty(),
+            "bytes were read from outside the skill"
+        );
+        assert_eq!(sup.declared, "../../../secrets.md", "the pointer is kept");
     }
 
     #[test]
@@ -213,20 +250,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlink_escape_rejected() {
+    /// A symlink out of the skill directory reads nothing either.
+    ///
+    /// The check is on the CANONICALISED path, so a link that looks local and
+    /// points away is caught the same as `../`. This is the case the guard
+    /// exists for, and relaxing escapes from fatal to referenced must not
+    /// weaken it: the assertion is on the bytes, not on the error type.
+    #[test]
+    fn a_symlink_out_of_the_skill_is_referenced_and_never_read() {
         use std::os::unix::fs::symlink;
         let tmp = TempDir::new().unwrap();
         let dir = setup_skill_dir(&tmp);
 
-        // File outside the skill tree.
         let outside_real = tmp.path().join("outside-real.md");
         fs::write(&outside_real, "real").unwrap();
-
-        // Symlink inside the skill dir pointing to it.
         let link = dir.join("trick.md");
         symlink(&outside_real, &link).unwrap();
 
-        let err = resolve(&dir, &["trick.md".to_string()]).unwrap_err();
-        assert!(matches!(err, SupplementaryError::EscapesSkillDir { .. }));
+        let out = resolve(&dir, &["trick.md".to_string()]).expect("a reference, not an error");
+        let sup = out.first().expect("one entry");
+        assert!(!sup.inlined, "a symlink pulled content in from outside");
+        assert!(sup.bytes.is_empty(), "bytes were read through a symlink");
     }
 }
