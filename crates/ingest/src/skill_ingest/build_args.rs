@@ -85,6 +85,7 @@ mod tests {
 
     fn sup(name: &str, bytes: &[u8]) -> ResolvedSupplementary {
         ResolvedSupplementary {
+            inlined: true,
             declared: name.into(),
             path: PathBuf::from(name),
             bytes: bytes.to_vec(),
