@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
+    /// A person is still thinking. Deliberately not Triage: triage is what an
+    /// agent filed and nobody has read, which is the opposite provenance.
+    Draft,
     Triage,
     Ready,
     InProgress,
@@ -20,6 +23,7 @@ pub enum TaskStatus {
 impl TaskStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            TaskStatus::Draft => "draft",
             TaskStatus::Triage => "triage",
             TaskStatus::Ready => "ready",
             TaskStatus::InProgress => "in_progress",
@@ -31,6 +35,7 @@ impl TaskStatus {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "draft" => Some(TaskStatus::Draft),
             "triage" => Some(TaskStatus::Triage),
             "ready" => Some(TaskStatus::Ready),
             "in_progress" => Some(TaskStatus::InProgress),
@@ -39,6 +44,56 @@ impl TaskStatus {
             "archived" => Some(TaskStatus::Archived),
             _ => None,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TaskOrigin
+// ---------------------------------------------------------------------------
+
+/// Who filed this: a person, or an agent.
+///
+/// A field rather than a convention. `created_by` already carries the same
+/// information -- `deferred:manual` is a person, `claude` is not -- and a whole
+/// tab is about to be sorted by it, which is more weight than a convention
+/// holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOrigin {
+    Human,
+    Agent,
+}
+
+impl TaskOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskOrigin::Human => "human",
+            TaskOrigin::Agent => "agent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "human" => Some(TaskOrigin::Human),
+            "agent" => Some(TaskOrigin::Agent),
+            _ => None,
+        }
+    }
+}
+
+/// Agent, and the default is the point.
+///
+/// Not because most work is agent work, but because the default has to be the
+/// value that cannot be verified. An agent that forgets to declare itself is
+/// then merely correct. An agent that forgets and is assumed human buries a
+/// person's own work under its output -- which is the exact failure the split
+/// exists to prevent, and it is silent.
+///
+/// Anything entered through the app is known to be human at the point of entry,
+/// so the trustworthy value is available precisely where it can be trusted.
+impl Default for TaskOrigin {
+    fn default() -> Self {
+        Self::Agent
     }
 }
 
@@ -58,6 +113,10 @@ pub struct Task {
     pub workspace_kind: Option<String>,
     pub workspace_path: Option<String>,
     pub created_by: String,
+    /// Who filed it. Defaults to Agent -- see [`TaskOrigin`] for why the
+    /// unverifiable value is the default.
+    #[serde(default)]
+    pub origin: TaskOrigin,
     pub block_reason: Option<String>,
     pub result: Option<String>,
     pub summary: Option<String>,
@@ -105,6 +164,10 @@ pub struct Comment {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateTaskRequest {
     pub title: String,
+    /// Who is filing this. Omitted means Agent, deliberately: the app knows a
+    /// person is typing and says so; nothing else can be trusted to.
+    #[serde(default)]
+    pub origin: TaskOrigin,
     pub body: Option<String>,
     pub assignee: Option<String>,
     pub reviewer: Option<String>,
@@ -178,6 +241,8 @@ pub struct KanbanBoard {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KanbanColumns {
+    /// A person's own work, before it is ready for anyone to pick up.
+    pub draft: Vec<Task>,
     pub triage: Vec<Task>,
     pub ready: Vec<Task>,
     pub in_progress: Vec<Task>,
@@ -191,6 +256,7 @@ impl KanbanBoard {
         let slim = |column: &Vec<Task>| column.iter().map(Task::slim).collect();
         KanbanBoard {
             columns: KanbanColumns {
+                draft: slim(&self.columns.draft),
                 triage: slim(&self.columns.triage),
                 ready: slim(&self.columns.ready),
                 in_progress: slim(&self.columns.in_progress),
@@ -222,6 +288,7 @@ mod tests {
             priority: 50,
             workspace_kind: None,
             workspace_path: None,
+            origin: TaskOrigin::Agent,
             created_by: "agent".to_string(),
             block_reason: None,
             result: Some("a long result".repeat(40)),
@@ -309,6 +376,7 @@ mod tests {
             priority: 50,
             workspace_kind: None,
             workspace_path: None,
+            origin: TaskOrigin::Agent,
             created_by: "agent".to_string(),
             block_reason: None,
             result: None,
@@ -340,5 +408,62 @@ mod tests {
             parsed["body"].as_str().unwrap(),
             "first line\nsecond line\twith tab\rand carriage"
         );
+    }
+
+    /// The default is the whole point of making this a field.
+    ///
+    /// An agent that forgets to declare itself is merely correct. An agent that
+    /// forgets and is assumed human buries a person's own work under its
+    /// output -- silently, and that burial is the exact thing the split exists
+    /// to prevent. So the default must be the value that cannot be verified.
+    #[test]
+    fn an_undeclared_origin_is_agent() {
+        assert_eq!(TaskOrigin::default(), TaskOrigin::Agent);
+    }
+
+    /// A row written before the column existed reads as NULL, and NULL must
+    /// land on Agent for the same reason -- the 2,816 rows already on the board
+    /// were all filed by agents.
+    #[test]
+    fn an_unparseable_origin_falls_back_to_agent() {
+        assert_eq!(TaskOrigin::parse("human"), Some(TaskOrigin::Human));
+        assert_eq!(TaskOrigin::parse("agent"), Some(TaskOrigin::Agent));
+        assert_eq!(TaskOrigin::parse(""), None);
+        assert_eq!(
+            TaskOrigin::parse("Human"),
+            None,
+            "the wire form is lowercase"
+        );
+    }
+
+    /// Draft and Triage are different states with opposite provenance, and
+    /// must not collapse into one another.
+    #[test]
+    fn draft_is_not_triage() {
+        assert_eq!(TaskStatus::parse("draft"), Some(TaskStatus::Draft));
+        assert_ne!(TaskStatus::Draft, TaskStatus::Triage);
+        assert_eq!(TaskStatus::Draft.as_str(), "draft");
+    }
+
+    /// Every status round-trips. A status that parses to None is a task that
+    /// vanishes from the board rather than one that shows up wrong, which is
+    /// the harder failure to notice.
+    #[test]
+    fn every_status_round_trips() {
+        for status in [
+            TaskStatus::Draft,
+            TaskStatus::Triage,
+            TaskStatus::Ready,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            TaskStatus::Complete,
+            TaskStatus::Archived,
+        ] {
+            assert_eq!(
+                TaskStatus::parse(status.as_str()),
+                Some(status.clone()),
+                "{status:?} did not survive a round trip"
+            );
+        }
     }
 }
