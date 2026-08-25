@@ -3050,6 +3050,14 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                     .map_err(|e| format!("{e:#}"))?;
             let store = forge_tasks::TaskStore::connect(&cql_hosts, None).map_err(|e| e.to_string())?;
             let req = forge_tasks::CreateTaskRequest {
+                // Declared by the caller, defaulting to Agent. The app knows a
+                // person is typing and passes "human"; an agent that says
+                // nothing is correctly recorded as an agent.
+                origin: args
+                    .get("origin")
+                    .and_then(|v| v.as_str())
+                    .and_then(forge_tasks::TaskOrigin::parse)
+                    .unwrap_or_default(),
                 title: args.get("title").and_then(|v| v.as_str()).ok_or("title is required")?.to_string(),
                 body: args.get("body").and_then(|v| v.as_str()).map(str::to_string),
                 assignee: args.get("assignee").and_then(|v| v.as_str()).map(str::to_string),
@@ -6164,6 +6172,10 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             let cql_hosts = forge_tasks::resolve_cql_hosts(cql_host.as_deref())?;
             let store = forge_tasks::TaskStore::connect(&cql_hosts, None)?;
             let req = forge_tasks::CreateTaskRequest {
+                // Default: `frg task create` is called by scripts as often as
+                // by people, and an unverifiable claim of humanity is the one
+                // this field must not make.
+                origin: forge_tasks::TaskOrigin::default(),
                 title,
                 body,
                 assignee,
