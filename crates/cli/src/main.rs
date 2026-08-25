@@ -3077,6 +3077,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                 "parents":        {"type": "array",   "items": {"type": "string"}, "description": "Parent task IDs to link to"},
                 "skills":         {"type": "array",   "items": {"type": "string"}, "description": "Related skill names"},
                 "created_by":     {"type": "string",  "description": "Creator identifier (default: agent)"},
+                "origin":         {"type": "string",  "enum": ["human", "agent"], "description": "Who filed this. Defaults to agent. Pass \"human\" ONLY when a person typed it — the Work tab separates a person's own work from what agents file, and a wrong claim here buries the person's."},
                 "cql_host":       {"type": "string",  "description": "CQL host:port (default: 127.0.0.1:9042)"},
                 "debug_stop":     {"type": "boolean", "description": "When true, attach a board-health alert (or fail on critical board degradation) so you stop and investigate instead of trusting a degraded board. Off by default."}
             },
