@@ -35,6 +35,15 @@ struct Cli {
     #[arg(long, global = true)]
     pretty: bool,
 
+    /// Cap how fast forge starts new units of work, in units per second
+    ///
+    /// Unset means unlimited, which is what every command has always done and
+    /// what a person waiting for an answer wants. Set it when running a large
+    /// scan on a machine that is also doing something else. Also settable with
+    /// FORGE_MAX_OPS_PER_SEC; this flag wins.
+    #[arg(long, global = true, value_name = "OPS_PER_SEC")]
+    rate_limit: Option<f64>,
+
     /// Run as MCP server over stdio (JSON-RPC 2.0)
     #[arg(long)]
     mcp: bool,
@@ -4451,8 +4460,36 @@ fn read_structured_json<T: serde::de::DeserializeOwned>(
         .map_err(|error| anyhow::anyhow!("invalid JSON in {}: {error}", path.display()))
 }
 
+/// The pace in force for this run.
+///
+/// The flag wins over the environment so a single command can be slowed without
+/// changing a machine-wide setting. A value that cannot be used is reported on
+/// stderr and the run continues unpaced: refusing to run would turn a bad
+/// FORGE_MAX_OPS_PER_SEC into every forge command failing, while staying silent
+/// would leave someone believing a limit is in force while their machine is
+/// hammered by a command they told to be gentle.
+fn resolve_rate_limit(flag: Option<f64>) -> forge_shared::rate_limit::RateLimit {
+    use forge_shared::rate_limit::{self, RateLimit};
+    if let Some(ops) = flag {
+        return match RateLimit::per_second(ops) {
+            Ok(limit) => limit,
+            Err(why) => {
+                eprintln!("forge: --rate-limit {ops} unusable: {why}; running unpaced");
+                RateLimit::unlimited()
+            }
+        };
+    }
+    let raw = std::env::var(rate_limit::RATE_LIMIT_ENV).ok();
+    let (limit, problem) = rate_limit::from_env_value(raw.as_deref());
+    if let Some(problem) = problem {
+        eprintln!("forge: {problem}; running unpaced");
+    }
+    limit
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let _rate_limit = resolve_rate_limit(cli.rate_limit);
 
     if cli.mcp && cli.mcp_http {
         anyhow::bail!("choose either --mcp for stdio or --mcp-http for HTTP, not both");

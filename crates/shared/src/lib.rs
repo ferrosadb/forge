@@ -4,6 +4,7 @@
 //! used across all subcommands.
 
 pub mod filters;
+pub mod rate_limit;
 pub mod secrets;
 pub mod tee;
 pub mod tracking;
