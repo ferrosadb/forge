@@ -16,7 +16,7 @@ mod glob;
 use fmem_skill_ingest::run_fmem_skill_ingest;
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Canonical hook command string. The hook delegates to `frg hook`
 /// which auto-detects the right filter at runtime.
@@ -145,6 +145,19 @@ enum Commands {
         /// Include file counts, LOC, module names, and dependencies
         #[arg(long)]
         summary: bool,
+    },
+
+    /// Alias for `project-detect --summary`
+    ///
+    /// Present as a subcommand because the MCP tool of the same name is, and a
+    /// name that works for an agent but not at the prompt is a name that gets
+    /// reported as broken. `frg project-summary` is what the blueprint skill
+    /// documents for its reconnaissance phase.
+    #[command(name = "project_summary", visible_alias = "project-summary")]
+    ProjectSummary {
+        /// Project directory to scan (defaults to current dir)
+        #[arg(default_value = ".")]
+        dir: PathBuf,
     },
 
     /// Summarize code structure: signatures, types, imports (no bodies)
@@ -1631,6 +1644,22 @@ fn handle_dsm(action: DsmAction, pretty: bool) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Emit detection plus structural summary.
+///
+/// Shared by `project-detect --summary` and the `project_summary` alias so the
+/// two cannot drift apart. Duplicating the json! here once meant the alias was
+/// only equal to what it aliases for as long as nobody edited one of them.
+fn emit_project_summary(dir: &Path, pretty: bool) -> anyhow::Result<()> {
+    let detect_result = forge_project_detect::detector::detect(dir);
+    let sum = forge_project_detect::summary::summarize(dir);
+    let combined = serde_json::json!({
+        "detection": detect_result,
+        "summary": sum,
+    });
+    println!("{}", forge_shared::emit_json(&combined, pretty)?);
     Ok(())
 }
 
@@ -4613,17 +4642,16 @@ fn main() -> anyhow::Result<()> {
         }
 
         Commands::ProjectDetect { dir, summary } => {
-            let detect_result = forge_project_detect::detector::detect(&dir);
             if summary {
-                let sum = forge_project_detect::summary::summarize(&dir);
-                let combined = serde_json::json!({
-                    "detection": detect_result,
-                    "summary": sum,
-                });
-                println!("{}", forge_shared::emit_json(&combined, cli.pretty)?);
+                emit_project_summary(&dir, cli.pretty)?;
             } else {
+                let detect_result = forge_project_detect::detector::detect(&dir);
                 println!("{}", forge_shared::emit_json(&detect_result, cli.pretty)?);
             }
+        }
+
+        Commands::ProjectSummary { dir } => {
+            emit_project_summary(&dir, cli.pretty)?;
         }
 
         Commands::Digest {
