@@ -7,54 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.18.0] - 2026-08-27
+
 ### Added
+
+- **Paced checklist execution.** Forge can rate-limit checklist work while
+  remaining unpaced by default, so operators can choose a bounded execution
+  cadence without slowing existing automation.
+- **CLI access to `project-summary`.** The compact project inventory previously
+  available only over MCP is now available directly from `frg`.
+- **Priority-first task paging.** Task and board reads return the ten most
+  important items first and explicitly report when another page is available.
+
+### Fixed
+
+- **Task-board reads fail loudly.** Failed board reads no longer collapse into
+  an indistinguishable empty result.
+
+## [0.17.1] - 2026-08-17
+
+Cumulative notes for the `0.15.0` through `0.17.1` developer-preview line.
+
+### Added
+
 - **Global config at `~/.config/forge.toml`.** The task board's CQL host (and
   `debug_stop`) can now be set machine-wide, resolved after an explicit
   argument, `FORGE_CQL_HOST` and the nearest `.forge/config.toml`, and before
   the built-in default. Same schema as the project file, and beside
   `~/.config/ferrosa-memory.toml`, which forge already reads.
-
-  Every previous layer was tied to where forge is run from, so an installer
-  provisioning a database on a non-default port could only reach forge by asking
-  the user to export a variable or by dropping a file into every repo they own;
-  anything else met `connect to CQL ... Connection refused` against a database
-  that was running the whole time. A project config still wins, so a repo can
-  pin its own board.
 - **Google Sheets ↔ task board sync.** New `frg sheet auth|pull|push` and MCP
-  `sheet_auth`/`sheet_pull`/`sheet_push`: pull open rows from a Google Sheet of
-  bugs into the CQL task board (idempotent, never-move-backward) and push
-  status/fix-version/resolution-notes back to the sheet's own cells, writing
-  only the configured `writable` columns with a lifecycle-handoff guard. OAuth
-  (installed-app loopback, `spreadsheets` scope) via `FORGE_GOOGLE_OAUTH_CLIENT`;
-  per-sheet mapping at `.forge/sheets/<alias>.toml` (see
-  `crates/sheet-sync/examples/spoton-qa.toml`).
-- **MCP draft 2026-07-28 support.** Forge's MCP server now implements
-  `server/discover`, returns `resultType: "complete"` plus server `_meta`, adds
-  cache metadata and tool `outputSchema` contracts to `tools/list`, and exposes
-  an optional Streamable HTTP endpoint via
-  `frg --mcp-http --mcp-http-addr HOST:PORT`. The HTTP endpoint enforces
-  `MCP-Protocol-Version`, `Mcp-Method`, Base64-safe `Mcp-Name` for
-  `tools/call`, required modern `_meta` fields, Origin validation,
-  `405 Method Not Allowed` for legacy GET/DELETE endpoint traffic, and
-  rejection of client JSON-RPC response bodies.
-- **Modern ferrosa-memory HTTP client calls.** `forge-fmem-client` now sends
-  draft per-request `_meta` and matching HTTP headers to ferrosa-memory's
-  long-running HTTP MCP server, while the negotiation helper tries
-  `server/discover` before falling back to legacy `initialize`.
-- **Trusted web read/search tools.** Added `frg fetch-url` / MCP `fetch_url` for
-  read-only page extraction through Forge's own HTTP path (no persistence, no
-  third-party extraction provider, no auxiliary LLM), plus `frg web-search` /
-  MCP `web_search` backed only by an explicitly configured SearXNG endpoint
-  (`FORGE_WEB_SEARCH_URL` or `SEARXNG_URL`). The search tool fails loud when no
-  trusted backend is configured. SearXNG result metadata is scrubbed before
-  return and prompt-injection-shaped results are dropped; `summary` is a bounded
-  deterministic extractive field, not an LLM-generated summary.
+  `sheet_auth`/`sheet_pull`/`sheet_push` commands synchronize configured sheets
+  with the CQL task board while preserving lifecycle ownership.
+- **MCP draft 2026-07-28 support.** Forge implements `server/discover`, modern
+  result metadata, output schemas, and an optional Streamable HTTP endpoint.
+- **Modern Ferrosa Memory HTTP calls.** The client negotiates current MCP
+  discovery and request metadata while retaining the legacy fallback.
+- **Trusted web read/search tools.** `fetch-url` and explicitly configured
+  SearXNG-backed `web-search` provide bounded, SSRF-guarded research paths.
 
 ### Fixed
-- **`ingest-url` now fetches the sanitized URL after stripping secret query
-  parameters** instead of only sanitizing the stored provenance URL. Relative
-  same-domain links are resolved before crawl filtering so `--depth` can follow
-  `/docs/page` and `../page` links while preserving SSRF checks on every fetch.
+
+- **Sanitized URLs are the URLs fetched.** Secret query parameters are removed
+  before `ingest-url` fetches, stores, or follows a URL.
 
 ## [0.14.0] - 2026-07-12
 
