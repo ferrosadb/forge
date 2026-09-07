@@ -13,6 +13,6 @@ pub use config::{resolve_cql_host, resolve_cql_hosts, resolve_debug_stop, DEFAUL
 pub use debug_stop::{apply_debug_stop, BoardHealth, DEBUG_STOP_CRITICAL};
 pub use store::{default_page_limit, page_hint, TaskStore};
 pub use types::{
-    Comment, CreateTaskRequest, KanbanBoard, Task, TaskFilter, TaskStatus, TaskWithLinks,
-    UpdateTaskPatch,
+    Comment, CreateTaskRequest, KanbanBoard, Task, TaskFilter, TaskOrigin, TaskStatus,
+    TaskWithLinks, UpdateTaskPatch,
 };

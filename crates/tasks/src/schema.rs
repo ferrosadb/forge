@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS agent_memory.tasks (
     workspace_kind text,
     workspace_path text,
     created_by text,
+    origin text,
     block_reason text,
     result text,
     summary text,
@@ -51,3 +52,15 @@ CREATE TABLE IF NOT EXISTS agent_memory.task_comments (
     PRIMARY KEY (tenant_id, task_id, comment_id)
 ) WITH CLUSTERING ORDER BY (comment_id ASC)
 ";
+
+/// Columns added after the table first shipped.
+///
+/// `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already
+/// exists, so a new column reaches a fresh install and no existing one. Every
+/// SELECT in the store names its columns, so the first read after an upgrade
+/// would fail on a column the deployed table does not have -- and that read is
+/// the whole board.
+///
+/// Each statement must be safe to run on every connect: an "already exists"
+/// answer is the expected one after the first time.
+pub const ALTER_TASKS_ADD_COLUMNS: &[&str] = &["ALTER TABLE agent_memory.tasks ADD origin text"];

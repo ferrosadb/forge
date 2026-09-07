@@ -16,11 +16,12 @@ use anyhow::{anyhow, Context, Result};
 use uuid::Uuid;
 
 use crate::schema::{
-    BOARD_KEYSPACE, CREATE_TASKS_TABLE, CREATE_TASK_COMMENTS_TABLE, CREATE_TASK_LINKS_TABLE,
+    ALTER_TASKS_ADD_COLUMNS, BOARD_KEYSPACE, CREATE_TASKS_TABLE, CREATE_TASK_COMMENTS_TABLE,
+    CREATE_TASK_LINKS_TABLE,
 };
 use crate::types::{
-    Comment, CreateTaskRequest, KanbanBoard, KanbanColumns, Task, TaskFilter, TaskStatus,
-    TaskWithLinks, UpdateTaskPatch,
+    Comment, CreateTaskRequest, KanbanBoard, KanbanColumns, Task, TaskFilter, TaskOrigin,
+    TaskStatus, TaskWithLinks, UpdateTaskPatch,
 };
 
 /// Fixed tenant UUID for the single-user forge setup.
@@ -203,6 +204,28 @@ impl TaskStore {
             cql_exec!(self.rt, &self.session, stmt.to_string())
                 .with_context(|| format!("ensure_schema: {}", first_line(stmt)))?;
         }
+
+        // Columns added after the table shipped. CREATE IF NOT EXISTS will not
+        // add them to an existing table, and every SELECT names its columns,
+        // so without this the first read after an upgrade fails on a column
+        // the deployed table does not have.
+        //
+        // "Already exists" is the expected answer from the second connect
+        // onward and is not an error. Anything else is: a column that silently
+        // failed to appear would take the whole board down on the next read,
+        // which is exactly the failure this exists to prevent.
+        for stmt in ALTER_TASKS_ADD_COLUMNS {
+            if let Err(error) = cql_exec!(self.rt, &self.session, stmt.to_string()) {
+                let text = format!("{error:#}").to_lowercase();
+                let already = text.contains("already exist")
+                    || text.contains("conflicts with an existing column")
+                    || text.contains("duplicate");
+                if !already {
+                    return Err(error)
+                        .with_context(|| format!("ensure_schema: {}", first_line(stmt)));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -226,10 +249,10 @@ impl TaskStore {
         let cql = format!(
             "INSERT INTO agent_memory.tasks \
              (tenant_id, task_id, title, body, status, assignee, reviewer, priority, \
-              workspace_kind, workspace_path, created_by, block_reason, result, summary, \
+              workspace_kind, workspace_path, created_by, origin, block_reason, result, summary, \
               metadata, skills, related_entity_ids, created_at, updated_at) \
              VALUES ({tenant}, '{tid}', '{title}', {body}, '{status}', {assignee}, {reviewer}, \
-              {priority}, {wkind}, {wpath}, '{cby}', null, null, null, {meta}, {skills}, \
+              {priority}, {wkind}, {wpath}, '{cby}', '{origin}', null, null, null, {meta}, {skills}, \
               {{}}, {now}, {now})",
             tenant = self.tenant_id,
             tid = esc(&task_id),
@@ -243,6 +266,7 @@ impl TaskStore {
             wpath = opt_str(&req.workspace_path),
             meta = opt_str(&req.metadata),
             cby = esc(&created_by),
+            origin = req.origin.as_str(),
             skills = skills_set,
             now = now,
         );
@@ -267,6 +291,7 @@ impl TaskStore {
             workspace_kind: req.workspace_kind,
             workspace_path: req.workspace_path,
             created_by,
+            origin: req.origin,
             block_reason: None,
             result: None,
             summary: None,
@@ -464,7 +489,7 @@ impl TaskStore {
         // task_id order and created_at is not a clustering column.
         let cql = format!(
             "SELECT task_id, title, body, status, assignee, reviewer, priority, \
-             workspace_kind, workspace_path, created_by, block_reason, result, summary, \
+             workspace_kind, workspace_path, created_by, origin, block_reason, result, summary, \
              metadata, skills, related_entity_ids, created_at, updated_at \
              FROM agent_memory.tasks WHERE {} LIMIT {} ALLOW FILTERING",
             where_clause, MAX_FETCH_ROWS
@@ -591,7 +616,7 @@ impl TaskStore {
     pub fn board(&self) -> Result<KanbanBoard> {
         let cql = format!(
             "SELECT task_id, title, body, status, assignee, reviewer, priority, \
-             workspace_kind, workspace_path, created_by, block_reason, result, summary, \
+             workspace_kind, workspace_path, created_by, origin, block_reason, result, summary, \
              metadata, skills, related_entity_ids, created_at, updated_at \
              FROM agent_memory.tasks \
              WHERE tenant_id={tenant} \
@@ -608,6 +633,7 @@ impl TaskStore {
         let rows = result.rows().context("board: expected rows")?;
         let tasks = parse_task_rows(rows).context("board: parse rows")?;
 
+        let mut draft = Vec::new();
         let mut triage = Vec::new();
         let mut ready = Vec::new();
         let mut in_progress = Vec::new();
@@ -616,6 +642,7 @@ impl TaskStore {
 
         for task in tasks {
             match task.status {
+                TaskStatus::Draft => draft.push(task),
                 TaskStatus::Triage => triage.push(task),
                 TaskStatus::Ready => ready.push(task),
                 TaskStatus::InProgress => in_progress.push(task),
@@ -629,6 +656,7 @@ impl TaskStore {
         // task_id order -- arbitrary -- so the most recently captured work sat
         // wherever its id happened to fall.
         for column in [
+            &mut draft,
             &mut triage,
             &mut ready,
             &mut in_progress,
@@ -640,6 +668,7 @@ impl TaskStore {
 
         Ok(KanbanBoard {
             columns: KanbanColumns {
+                draft,
                 triage,
                 ready,
                 in_progress,
@@ -657,7 +686,7 @@ impl TaskStore {
     fn fetch_task_row(&self, task_id: &str) -> Result<Option<Task>> {
         let cql = format!(
             "SELECT task_id, title, body, status, assignee, reviewer, priority, \
-             workspace_kind, workspace_path, created_by, block_reason, result, summary, \
+             workspace_kind, workspace_path, created_by, origin, block_reason, result, summary, \
              metadata, skills, related_entity_ids, created_at, updated_at \
              FROM agent_memory.tasks \
              WHERE tenant_id={tenant} AND task_id='{tid}'",
@@ -728,6 +757,12 @@ fn parse_task_row(row: scylla::frame::response::result::Row) -> Result<Task> {
     let workspace_path = col_opt_str(cols.next());
     let created_by = col_opt_str_strict(cols.next(), "created_by")?
         .unwrap_or_else(|| DEFAULT_CREATED_BY.to_string());
+    // Positionally after created_by, matching every SELECT above. A row
+    // written before this column existed reads as NULL, which is Agent -- the
+    // right answer for the 2,816 rows that were all filed by agents anyway.
+    let origin = col_opt_str(cols.next())
+        .and_then(|raw| TaskOrigin::parse(&raw))
+        .unwrap_or_default();
     let block_reason = col_opt_str(cols.next());
     let result_val = col_opt_str(cols.next());
     let summary = col_opt_str(cols.next());
@@ -751,6 +786,7 @@ fn parse_task_row(row: scylla::frame::response::result::Row) -> Result<Task> {
         workspace_kind,
         workspace_path,
         created_by,
+        origin,
         block_reason,
         result: result_val,
         summary,
@@ -924,6 +960,7 @@ mod tests {
                 None,                                      // workspace_kind
                 None,                                      // workspace_path
                 Some(CqlValue::Text("agent".into())),      // created_by
+                Some(CqlValue::Text("human".into())),      // origin
                 None,                                      // block_reason
                 None,                                      // result
                 None,                                      // summary
@@ -945,7 +982,7 @@ mod tests {
     const STATUS: usize = 3;
     const PRIORITY: usize = 6;
     const CREATED_BY: usize = 9;
-    const CREATED_AT: usize = 16;
+    const CREATED_AT: usize = 17;
 
     #[test]
     fn a_well_formed_row_parses() {
