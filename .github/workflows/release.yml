@@ -32,6 +32,19 @@ jobs:
             artifact: frg-linux-x86_64
             binary: frg
             archive: tar.gz
+          # Native arm64 Linux, not cross-compilation. This job builds with a
+          # plain `cargo build --release` and then RUNS the binary to smoke
+          # test it; a cross-compiled aarch64 binary cannot be executed on an
+          # x86_64 runner, so the check that the artifact actually works would
+          # have to be dropped exactly where it matters most.
+          #
+          # ferrosa-installer's vz target is the Apple Virtualization Linux
+          # guest, which is aarch64. Without this artifact it reports forge
+          # unpinned and the image cannot be built.
+          - os: ubuntu-24.04-arm
+            artifact: frg-linux-aarch64
+            binary: frg
+            archive: tar.gz
           - os: macos-14
             artifact: frg-macos-aarch64
             binary: frg
