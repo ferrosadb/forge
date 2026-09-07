@@ -143,6 +143,11 @@ fn plan_row(
 /// (`assignee`, `reviewer`, `workspace_kind`, `workspace_path`, `parents`).
 pub fn build_create_request(row: &CanonicalRow, mapping: &SheetMapping) -> CreateTaskRequest {
     CreateTaskRequest {
+        // Human. A QA sheet row is written by a person; sheet-sync only
+        // carries it across. Marking it Agent because a script did the
+        // carrying would bury the operator's own tracker under agent output,
+        // which is the exact burial the origin split exists to prevent.
+        origin: forge_tasks::TaskOrigin::Human,
         title: build_title(row),
         body: build_body(row),
         assignee: None,

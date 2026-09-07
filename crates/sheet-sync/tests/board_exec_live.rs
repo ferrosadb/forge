@@ -19,6 +19,7 @@ fn create_with_non_triage_target_status_lands_via_follow_up_update() {
     let op = BoardOp::Create {
         row_id: "row-live-1".to_string(),
         req: CreateTaskRequest {
+            origin: forge_tasks::TaskOrigin::default(),
             title: "board_exec_live smoke task".to_string(),
             body: None,
             assignee: None,
