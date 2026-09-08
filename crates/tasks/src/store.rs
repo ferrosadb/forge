@@ -62,6 +62,50 @@ fn gen_task_id() -> String {
     format!("t_{:08x}", v)
 }
 
+/// Resolve a repository path to its primary checkout.
+///
+/// `git rev-parse --show-toplevel` reports the *linked worktree* when an
+/// agent is running in one. Persisting that value makes the task board depend
+/// on an ephemeral `.wt-*` directory. `git worktree list --porcelain` lists
+/// the primary checkout first, which is the stable repository location used
+/// to group and display work items.
+///
+/// This is deliberately best-effort: callers may legitimately use a path
+/// that is not a Git checkout, and creating a task must not fail because Git
+/// is unavailable.
+fn primary_checkout(path: &str) -> String {
+    let output = std::process::Command::new("git")
+        .args(["-C", path, "worktree", "list", "--porcelain"])
+        .output();
+    let Ok(output) = output else {
+        return path.to_owned();
+    };
+    if !output.status.success() {
+        return path.to_owned();
+    }
+    let worktrees = String::from_utf8_lossy(&output.stdout);
+    let root = primary_checkout_from_worktree_list(&worktrees);
+    root.and_then(|root| std::fs::canonicalize(root).ok())
+        .map(|root| root.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.unwrap_or(path).to_owned())
+}
+
+fn primary_checkout_from_worktree_list(worktrees: &str) -> Option<&str> {
+    worktrees
+        .lines()
+        .find_map(|line| line.strip_prefix("worktree "))
+}
+
+/// Store repository work against its stable primary checkout, never the
+/// transient linked worktree an agent happened to use.
+fn normalized_workspace_path(kind: Option<&str>, path: Option<&str>) -> Option<String> {
+    match (kind, path) {
+        (Some("repo"), Some(path)) if !path.is_empty() => Some(primary_checkout(path)),
+        (_, Some(path)) => Some(path.to_owned()),
+        (_, None) => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper: run a CQL statement on an Arc<Session> in a blocking fashion.
 // ---------------------------------------------------------------------------
@@ -243,6 +287,8 @@ impl TaskStore {
             .created_by
             .clone()
             .unwrap_or_else(|| "agent".to_string());
+        let workspace_path =
+            normalized_workspace_path(req.workspace_kind.as_deref(), req.workspace_path.as_deref());
 
         let skills_set = format_set_text(req.skills.as_deref().unwrap_or(&[]));
 
@@ -263,7 +309,7 @@ impl TaskStore {
             reviewer = opt_str(&req.reviewer),
             priority = priority,
             wkind = opt_str(&req.workspace_kind),
-            wpath = opt_str(&req.workspace_path),
+            wpath = opt_str(&workspace_path),
             meta = opt_str(&req.metadata),
             cby = esc(&created_by),
             origin = req.origin.as_str(),
@@ -289,7 +335,7 @@ impl TaskStore {
             reviewer: req.reviewer,
             priority,
             workspace_kind: req.workspace_kind,
-            workspace_path: req.workspace_path,
+            workspace_path,
             created_by,
             origin: req.origin,
             block_reason: None,
@@ -945,6 +991,24 @@ pub fn page_hint(total: usize, offset: usize, returned: usize) -> Option<String>
 mod tests {
     use super::*;
     use scylla::frame::response::result::{CqlValue, Row};
+
+    #[test]
+    fn primary_checkout_is_the_first_worktree_git_reports() {
+        assert_eq!(
+            primary_checkout_from_worktree_list(
+                "worktree /src/ferrosa-memory\nHEAD abc\n\nworktree /src/ferrosa-memory/.wt-task\nHEAD def\n"
+            ),
+            Some("/src/ferrosa-memory")
+        );
+    }
+
+    #[test]
+    fn non_repo_workspace_paths_are_left_unchanged() {
+        assert_eq!(
+            normalized_workspace_path(Some("directory"), Some("/tmp/.wt-not-a-repo")),
+            Some("/tmp/.wt-not-a-repo".to_owned())
+        );
+    }
 
     /// A well-formed `tasks` row in the column order every SELECT uses.
     fn valid_row() -> Row {

@@ -1046,7 +1046,7 @@ enum TaskAction {
         /// Creator name (defaults to "agent")
         #[arg(long)]
         created_by: Option<String>,
-        /// Workspace path (e.g. repo root) — the per-repo key for /whats-next and /roadmap
+        /// Workspace path (e.g. repo root) — repository paths are stored as the primary checkout, never a linked worktree
         #[arg(long)]
         workspace_path: Option<String>,
         /// Metadata as a JSON string (e.g. '{"source":"stop-hook"}')
