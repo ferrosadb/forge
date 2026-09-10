@@ -1,0 +1,96 @@
+name: Nightly release
+
+# A nightly cut, so the installer can bundle current code instead of whatever
+# was last tagged by hand.
+#
+# The tag is CalVer -- vYYYY.MM.DD.HHMM -- and the crate version carries a
+# -nightly suffix. The tag says WHEN it was cut; the version says what it is
+# heading towards. release.yml checks that pairing rather than requiring the
+# two to be equal.
+#
+# Mirrors ferrosa's nightly-release.yml, which is where this scheme comes from.
+
+on:
+  schedule:
+    - cron: '25 0 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Cut a nightly even with no commits since the last tag.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: nightly-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    name: Tag a nightly and dispatch the release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Is there anything to release?
+        id: check
+        run: |
+          set -euo pipefail
+          last="$(git describe --tags --abbrev=0 2>/dev/null || echo '')"
+          if [ -z "$last" ]; then
+            echo "no tags yet; this will be the first nightly"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          n="$(git rev-list --count "${last}..HEAD")"
+          echo "$n commits since $last"
+          # Nothing new means nothing to ship. A nightly that republishes
+          # yesterday's tree gives every consumer a new digest to re-fetch and
+          # re-verify for no change, and buries the releases that do differ.
+          if [ "$n" -eq 0 ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Nothing new
+        if: steps.check.outputs.should_release != 'true'
+        run: echo "No commits since the last tag; skipping."
+
+      - name: Set the nightly version, tag, and push
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          base="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          base="${base%-nightly}"
+          [ -n "$base" ] || { echo "could not read the workspace version" >&2; exit 1; }
+
+          tag="v$(date -u +%Y.%m.%d.%H%M)"
+          # Two cuts in the same UTC minute would collide. Say so rather than
+          # force-moving a tag someone may already have fetched.
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "ERROR: $tag already exists; rerun in a minute" >&2
+            exit 1
+          fi
+
+          perl -0pi -e 's/(\[workspace\.package\][^\[]*?version\s*=\s*)"[^"]+"/${1}"'"${base}-nightly"'"/s' Cargo.toml
+          cargo update -w -q
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(nightly): ${tag} (${base}-nightly)"
+          git tag -a "$tag" -m "$tag nightly"
+          git push origin "$tag"
+          echo "NIGHTLY_TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Dispatch the release build
+        if: steps.check.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY"
