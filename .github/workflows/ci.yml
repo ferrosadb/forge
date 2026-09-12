@@ -133,3 +133,16 @@ jobs:
         run: cargo install --locked cargo-deny
       - name: Check advisories + licenses + bans + sources
         run: cargo deny check
+
+  # memory-public (the old public mirror of ferrosa-memory-private) is NOT TO
+  # BE USED. Fails the build on any tracked reference to it; see the warning
+  # at the top of CLAUDE.md.
+  memory-public-guard:
+    name: No memory-public
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Guard against memory-public
+        run: bash scripts/guard-no-memory-public.sh
+      - name: Guard tests
+        run: bash tests/test_guard_no_memory_public.sh
