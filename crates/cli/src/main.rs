@@ -1,7 +1,7 @@
 //! `forge` — Token-saving CLI for Claude Code skill workflows.
 //! Correctness: Correct when CLI/MCP contracts preserve structured inputs, legacy modes, and Forge-gated tests.
-//! Last revised: 2026-07-12
-//! Last changed: Wired anti-loop checklist attempts, gates, reviews, resolution, and scored scheduling.
+//! Last revised: 2026-09-15
+//! Last changed: Prevented filters and legacy Bash hooks from adding more context than their raw input.
 //!
 //! Single binary with subcommands for summarizing test output, distilling logs,
 //! filtering diffs, deduplicating lint output, monitoring logs, validating
@@ -1279,11 +1279,22 @@ fn filter_output(
     let start = std::time::Instant::now();
 
     match apply_filter(&filter_name, raw_output, pretty) {
-        Ok(output) => FilterResult {
+        Ok(output) if output.len() <= raw_output.len() => FilterResult {
             filter_name,
             output,
             success: true,
             error: None,
+            duration_ms: start.elapsed().as_millis() as u64,
+        },
+        Ok(output) => FilterResult {
+            filter_name,
+            output: raw_output.to_string(),
+            success: false,
+            error: Some(format!(
+                "filter expanded output from {} to {} bytes; returned raw output",
+                raw_output.len(),
+                output.len()
+            )),
             duration_ms: start.elapsed().as_millis() as u64,
         },
         Err(e) => {
@@ -1327,15 +1338,6 @@ fn generate_hook_config() -> serde_json::Value {
                 }
             ],
             "PostToolUse": [
-                {
-                    "matcher": "Bash",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": CANONICAL_HOOK_COMMAND
-                        }
-                    ]
-                },
                 {
                     "matcher": "Read",
                     "hooks": [
@@ -6144,77 +6146,12 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                // ── PostToolUse Bash filter (existing) ──
+                // PostToolUse cannot replace Bash's raw tool result; anything
+                // printed here is appended to the model context. Keep this
+                // legacy branch silent so existing global hook installs stop
+                // duplicating command output as soon as Forge is upgraded.
                 ("Bash", true) => {
-                    let command = hook_json
-                        .get("tool_input")
-                        .and_then(|v| v.get("command"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if command.is_empty() {
-                        return Ok(());
-                    }
-
-                    let tool_output = hook_json
-                        .get("tool_response")
-                        .map(|v| {
-                            if let Some(s) = v.as_str() {
-                                s.to_string()
-                            } else if let Some(stdout) = v.get("stdout").and_then(|s| s.as_str()) {
-                                stdout.to_string()
-                            } else {
-                                v.to_string()
-                            }
-                        })
-                        .unwrap_or_default();
-                    if tool_output.is_empty() {
-                        return Ok(());
-                    }
-
-                    let registry = forge_shared::filters::FilterRegistry::load();
-                    let input_bytes = tool_output.len();
-                    let project_dir = hook_json
-                        .get("cwd")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                        .or_else(|| {
-                            std::env::current_dir()
-                                .ok()
-                                .map(|p| p.display().to_string())
-                        });
-
-                    // Detect and apply the appropriate filter (with fallback)
-                    let fr = filter_output(&registry, command, &tool_output, cli.pretty);
-                    let filter = fr.filter_name;
-                    let output = fr.output;
-                    let filter_ok = fr.success;
-                    let filter_err = fr.error;
-                    let duration_ms = fr.duration_ms;
-
-                    // Print compressed output — Claude Code appends hook stdout as context
-                    print!("{}", output);
-
-                    // Track in filter_log
-                    if let Ok(db_path) = forge_shared::tracking::default_db_path() {
-                        if let Ok(conn) = forge_shared::tracking::open_db(&db_path) {
-                            let _ = forge_shared::tracking::record_filter(
-                                &conn,
-                                &forge_shared::tracking::FilterRecord {
-                                    command,
-                                    filter_name: &filter,
-                                    mode: forge_shared::tracking::InvocationMode::Hook,
-                                    project_dir: project_dir.as_deref(),
-                                    input_bytes,
-                                    output_bytes: output.len(),
-                                    duration_ms,
-                                    filter_success: filter_ok,
-                                    error_message: filter_err.as_deref(),
-                                    exit_code: 0,
-                                    tool_version: env!("CARGO_PKG_VERSION"),
-                                },
-                            );
-                        }
-                    }
+                    return Ok(());
                 }
 
                 // Unknown tool or phase — ignore
@@ -6478,5 +6415,29 @@ mod ferrosa_memory_config_tests {
             config(false).http_base_url().as_deref(),
             Some("http://127.0.0.1:18765")
         );
+    }
+}
+
+#[cfg(test)]
+mod token_bloat_tests {
+    use super::{filter_output, generate_hook_config};
+
+    #[test]
+    fn filtering_never_returns_more_bytes_than_the_raw_output() {
+        let registry = forge_shared::filters::FilterRegistry::load();
+        let raw = "SwiftCompile Foo.swift -Werror=non-modular-include-in-framework-module";
+        let result = filter_output(&registry, "xcodebuild test", raw, false);
+        assert!(result.output.len() <= raw.len());
+    }
+
+    #[test]
+    fn generated_hooks_do_not_append_a_second_copy_of_bash_output() {
+        let config = generate_hook_config();
+        let post_hooks = config["hooks"]["PostToolUse"]
+            .as_array()
+            .expect("PostToolUse hook list");
+        assert!(post_hooks
+            .iter()
+            .all(|hook| hook["matcher"].as_str() != Some("Bash")));
     }
 }
