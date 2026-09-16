@@ -604,15 +604,10 @@ pub fn access_token(alias: &str, client: &OAuthClient) -> anyhow::Result<AccessT
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::PROCESS_ENV_LOCK;
 
-    // `OAuthClient::load`'s env-var test mutates process-global state
-    // (`std::env::var`/`remove_var`), so it must never run concurrently
-    // with another test that also touches `FORGE_GOOGLE_OAUTH_CLIENT`.
-    // This crate has exactly one such test; the mutex is a belt-and-
-    // braces guard against a future second one racing it.
-    static CLIENT_SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
-
+    // `OAuthClient::load`'s test mutates process-global environment and cwd,
+    // so it must never run concurrently with the credentials tests.
     const INSTALLED_JSON: &str = r#"{
         "installed": {
             "client_id": "abc123.apps.googleusercontent.com",
@@ -661,9 +656,7 @@ mod tests {
 
     #[test]
     fn load_errs_when_env_unset_and_no_config_file() {
-        let _guard = CLIENT_SECRET_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = PROCESS_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
         let prior = std::env::var(CLIENT_SECRET_ENV).ok();
         std::env::remove_var(CLIENT_SECRET_ENV);

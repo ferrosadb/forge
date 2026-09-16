@@ -152,19 +152,7 @@ pub fn authorize(alias: &str) -> anyhow::Result<AuthOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Both `resolve`'s env-var checks mutate process-global state
-    // (`std::env::var`/`remove_var`, `std::env::set_current_dir`), so
-    // tests that touch `FORGE_GOOGLE_SERVICE_ACCOUNT`/`FORGE_GOOGLE_OAUTH_CLIENT`
-    // or the cwd must never run concurrently with each other or with
-    // `oauth`'s own `CLIENT_SECRET_ENV_LOCK`-guarded test — Rust's default
-    // `cargo test` runner runs tests in the same crate on multiple
-    // threads, and both env vars/cwd are genuinely process-global, so an
-    // ad hoc per-module lock does not fully prevent a race against
-    // `oauth::tests`. This lock at least prevents this module's own tests
-    // from racing each other.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::PROCESS_ENV_LOCK;
 
     const VALID_SA_JSON: &str = r#"{
         "type": "service_account",
@@ -175,7 +163,7 @@ mod tests {
 
     #[test]
     fn resolve_prefers_service_account_from_env() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = PROCESS_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
         let prior_sa = std::env::var(SERVICE_ACCOUNT_ENV).ok();
         let prior_oauth = std::env::var(oauth::CLIENT_SECRET_ENV).ok();
@@ -206,7 +194,7 @@ mod tests {
 
     #[test]
     fn resolve_errs_naming_both_options_when_neither_configured() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = PROCESS_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
         let prior_sa = std::env::var(SERVICE_ACCOUNT_ENV).ok();
         let prior_oauth = std::env::var(oauth::CLIENT_SECRET_ENV).ok();
