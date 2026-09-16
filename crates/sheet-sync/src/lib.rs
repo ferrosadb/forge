@@ -28,3 +28,7 @@ pub use board::BoardSink;
 pub use config::resolve_alias;
 pub use sheets::SheetsApi;
 pub use sync::{pull, push, PullOptions, PullReport, PushOptions, PushReport};
+
+/// Serializes tests that mutate process-global credentials or the cwd.
+#[cfg(test)]
+pub(crate) static PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
