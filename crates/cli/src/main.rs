@@ -1301,6 +1301,19 @@ fn filter_output(
             // If a specialized filter failed, try the fallback filter
             if filter_name != registry.fallback {
                 if let Ok(fallback_output) = apply_filter(&registry.fallback, raw_output, pretty) {
+                    if fallback_output.len() > raw_output.len() {
+                        return FilterResult {
+                            filter_name,
+                            output: raw_output.to_string(),
+                            success: false,
+                            error: Some(format!(
+                                "filter failed ({e}); fallback expanded output from {} to {} bytes; returned raw output",
+                                raw_output.len(),
+                                fallback_output.len()
+                            )),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                        };
+                    }
                     return FilterResult {
                         filter_name,
                         output: fallback_output,
@@ -4856,7 +4869,7 @@ fn main() -> anyhow::Result<()> {
             };
 
             // Print filtered output
-            println!("{}", filtered);
+            print!("{}", filtered);
 
             // Show tee path if saved
             if let Some(path) = &tee_path {
@@ -6428,6 +6441,20 @@ mod token_bloat_tests {
         let raw = "SwiftCompile Foo.swift -Werror=non-modular-include-in-framework-module";
         let result = filter_output(&registry, "xcodebuild test", raw, false);
         assert!(result.output.len() <= raw.len());
+    }
+
+    #[test]
+    fn expanding_fallback_returns_raw_output_after_specialized_filter_failure() {
+        let registry = forge_shared::filters::FilterRegistry::load();
+        let raw = "hello\n";
+        let result = filter_output(&registry, "cargo test", raw, false);
+
+        assert_eq!(result.output, raw);
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("fallback expanded output")));
     }
 
     #[test]
