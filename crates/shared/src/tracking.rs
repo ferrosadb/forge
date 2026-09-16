@@ -1,4 +1,7 @@
 //! Token savings tracking via SQLite.
+//! Correctness: Correct when each invocation is counted once and expansion is reported as negative savings.
+//! Last revised: 2026-09-15
+//! Last changed: Deduplicated legacy run rows and made token expansion visible.
 //!
 //! Records input/output byte counts per command invocation,
 //! estimates token savings, and provides analytics queries.
@@ -402,7 +405,7 @@ pub struct GainSummary {
     pub total_commands: u64,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
-    pub total_saved_tokens: u64,
+    pub total_saved_tokens: i64,
     pub savings_pct: f64,
     pub by_subcommand: Vec<SubcommandGain>,
     pub daily: Vec<DailyGain>,
@@ -414,7 +417,7 @@ pub struct SubcommandGain {
     pub count: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub saved_tokens: u64,
+    pub saved_tokens: i64,
     pub savings_pct: f64,
 }
 
@@ -422,19 +425,31 @@ pub struct SubcommandGain {
 pub struct DailyGain {
     pub date: String,
     pub commands: u64,
-    pub saved_tokens: u64,
+    pub saved_tokens: i64,
 }
 
-/// Query cumulative token savings from both command_log (run mode)
-/// and filter_log (hook/pipe mode).
+/// Query cumulative token savings without counting modern run invocations twice.
+///
+/// `frg run` writes a legacy `command_log` row and a detailed `filter_log`
+/// row for compatibility. The detailed row is canonical; unmatched legacy rows
+/// remain visible for history recorded before `filter_log` existed.
 pub fn query_gains(conn: &Connection) -> Result<GainSummary> {
-    // Combined totals from both tables
     let mut stmt = conn.prepare(
         "SELECT COUNT(*), COALESCE(SUM(input_bytes), 0), COALESCE(SUM(output_bytes), 0)
          FROM (
-             SELECT input_bytes, output_bytes FROM command_log
-             UNION ALL
              SELECT input_bytes, output_bytes FROM filter_log
+             UNION ALL
+             SELECT c.input_bytes, c.output_bytes FROM command_log c
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM filter_log f
+                 WHERE f.invocation_mode = 'run'
+                   AND f.timestamp = c.timestamp
+                   AND f.command = c.command
+                   AND f.filter_name = c.subcommand
+                   AND f.input_bytes = c.input_bytes
+                   AND f.output_bytes = c.output_bytes
+                   AND f.exit_code = c.exit_code
+             )
          )",
     )?;
     let (total_commands, total_in_bytes, total_out_bytes): (u64, u64, u64) =
@@ -442,20 +457,29 @@ pub fn query_gains(conn: &Connection) -> Result<GainSummary> {
 
     let total_input_tokens = (total_in_bytes as f64 / BYTES_PER_TOKEN) as u64;
     let total_output_tokens = (total_out_bytes as f64 / BYTES_PER_TOKEN) as u64;
-    let total_saved_tokens = total_input_tokens.saturating_sub(total_output_tokens);
+    let total_saved_tokens = total_input_tokens as i64 - total_output_tokens as i64;
     let savings_pct = if total_input_tokens > 0 {
         (total_saved_tokens as f64 / total_input_tokens as f64) * 100.0
     } else {
         0.0
     };
 
-    // By source: command_log subcommands + filter_log filter_names
     let mut stmt = conn.prepare(
         "SELECT source, COUNT(*), SUM(input_bytes), SUM(output_bytes)
          FROM (
-             SELECT subcommand AS source, input_bytes, output_bytes FROM command_log
-             UNION ALL
              SELECT filter_name AS source, input_bytes, output_bytes FROM filter_log
+             UNION ALL
+             SELECT c.subcommand AS source, c.input_bytes, c.output_bytes FROM command_log c
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM filter_log f
+                 WHERE f.invocation_mode = 'run'
+                   AND f.timestamp = c.timestamp
+                   AND f.command = c.command
+                   AND f.filter_name = c.subcommand
+                   AND f.input_bytes = c.input_bytes
+                   AND f.output_bytes = c.output_bytes
+                   AND f.exit_code = c.exit_code
+             )
          )
          GROUP BY source ORDER BY SUM(input_bytes) - SUM(output_bytes) DESC",
     )?;
@@ -467,7 +491,7 @@ pub fn query_gains(conn: &Connection) -> Result<GainSummary> {
             let out_b: u64 = row.get(3)?;
             let in_t = (in_b as f64 / BYTES_PER_TOKEN) as u64;
             let out_t = (out_b as f64 / BYTES_PER_TOKEN) as u64;
-            let saved = in_t.saturating_sub(out_t);
+            let saved = in_t as i64 - out_t as i64;
             let pct = if in_t > 0 {
                 (saved as f64 / in_t as f64) * 100.0
             } else {
@@ -484,22 +508,26 @@ pub fn query_gains(conn: &Connection) -> Result<GainSummary> {
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Daily breakdown (last 30 days) from both tables
     let mut stmt = conn.prepare(
-        "SELECT d, SUM(cnt), SUM(saved)
-         FROM (
-             SELECT date(timestamp) AS d, COUNT(*) AS cnt,
-                    SUM(input_bytes) - SUM(output_bytes) AS saved
-             FROM command_log
-             WHERE timestamp > datetime('now', '-30 days')
-             GROUP BY date(timestamp)
+        "WITH gains AS (
+             SELECT timestamp, input_bytes, output_bytes FROM filter_log
              UNION ALL
-             SELECT date(timestamp) AS d, COUNT(*) AS cnt,
-                    SUM(input_bytes) - SUM(output_bytes) AS saved
-             FROM filter_log
-             WHERE timestamp > datetime('now', '-30 days')
-             GROUP BY date(timestamp)
+             SELECT c.timestamp, c.input_bytes, c.output_bytes FROM command_log c
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM filter_log f
+                 WHERE f.invocation_mode = 'run'
+                   AND f.timestamp = c.timestamp
+                   AND f.command = c.command
+                   AND f.filter_name = c.subcommand
+                   AND f.input_bytes = c.input_bytes
+                   AND f.output_bytes = c.output_bytes
+                   AND f.exit_code = c.exit_code
+             )
          )
+         SELECT date(timestamp) AS d, COUNT(*) AS cnt,
+                SUM(input_bytes) - SUM(output_bytes) AS saved
+         FROM gains
+         WHERE timestamp > datetime('now', '-30 days')
          GROUP BY d ORDER BY d DESC LIMIT 30",
     )?;
     let daily: Vec<DailyGain> = stmt
@@ -510,7 +538,7 @@ pub fn query_gains(conn: &Connection) -> Result<GainSummary> {
             Ok(DailyGain {
                 date,
                 commands,
-                saved_tokens: (saved_bytes.max(0) as f64 / BYTES_PER_TOKEN) as u64,
+                saved_tokens: (saved_bytes as f64 / BYTES_PER_TOKEN) as i64,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -631,6 +659,65 @@ mod tests {
         assert_eq!(gains.total_commands, 2);
         assert!(gains.savings_pct > 80.0);
         assert_eq!(gains.by_subcommand.len(), 2);
+    }
+
+    #[test]
+    fn gains_count_a_modern_run_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        open_db_in_memory(&conn).unwrap();
+
+        record(&conn, "cargo test", "test-summary", 10_000, 500, 0).unwrap();
+        record_filter(
+            &conn,
+            &FilterRecord {
+                command: "cargo test",
+                filter_name: "test-summary",
+                mode: InvocationMode::Run,
+                project_dir: Some("/home/user/myproject"),
+                input_bytes: 10_000,
+                output_bytes: 500,
+                duration_ms: 12,
+                filter_success: true,
+                error_message: None,
+                exit_code: 0,
+                tool_version: "0.0.0-test",
+            },
+        )
+        .unwrap();
+
+        let gains = query_gains(&conn).unwrap();
+        assert_eq!(gains.total_commands, 1);
+        assert_eq!(gains.by_subcommand[0].count, 1);
+    }
+
+    #[test]
+    fn gains_report_expansion_as_negative_savings() {
+        let conn = Connection::open_in_memory().unwrap();
+        open_db_in_memory(&conn).unwrap();
+
+        record_filter(
+            &conn,
+            &FilterRecord {
+                command: "xcodebuild test",
+                filter_name: "log-distill",
+                mode: InvocationMode::Run,
+                project_dir: Some("/home/user/myproject"),
+                input_bytes: 400,
+                output_bytes: 800,
+                duration_ms: 12,
+                filter_success: true,
+                error_message: None,
+                exit_code: 0,
+                tool_version: "0.0.0-test",
+            },
+        )
+        .unwrap();
+
+        let gains = query_gains(&conn).unwrap();
+        assert_eq!(gains.total_saved_tokens, -100);
+        assert_eq!(gains.by_subcommand[0].saved_tokens, -100);
+        assert!(gains.savings_pct < 0.0);
+        assert!(gains.daily[0].saved_tokens < 0);
     }
 
     #[test]

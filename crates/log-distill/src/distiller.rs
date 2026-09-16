@@ -1,7 +1,11 @@
 //! Core log distillation logic.
+//! Correctness: Correct when actionable diagnostics survive while command-line flags do not become diagnostics.
+//! Last revised: 2026-09-15
+//! Last changed: Restricted diagnostic matching so compiler flags such as `-Werror` cannot expand output.
 
 use regex::Regex;
 use serde::Serialize;
+use std::sync::LazyLock;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct DistilledLog {
@@ -71,19 +75,21 @@ fn is_noise(line: &str) -> bool {
 }
 
 fn is_error(line: &str) -> bool {
-    let lower = line.to_lowercase();
-    lower.contains("error")
-        || lower.contains("failed")
-        || lower.contains("panic")
-        || lower.contains("fatal")
-        || lower.contains("exception")
-        || lower.starts_with("e ")
-        || lower.starts_with("error[")
+    static ERROR: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i)(^|[[:space:]:])(?:error(?:\[[^]]+\])?|failed|panic(?:ked)?|fatal|exception)(?:$|[[:space:]:\[])|[A-Za-z][A-Za-z0-9_]*Error:|^npm ERR!|^##\[error\]",
+        )
+        .expect("valid error diagnostic regex")
+    });
+    ERROR.is_match(strip_timestamp(line).trim())
 }
 
 fn is_warning(line: &str) -> bool {
-    let lower = line.to_lowercase();
-    lower.contains("warning") || lower.contains("warn") || lower.starts_with("w ")
+    static WARNING: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)(^|[[:space:]:])warning(?:$|[[:space:]:\[])|^w |^##\[warning\]")
+            .expect("valid warning diagnostic regex")
+    });
+    WARNING.is_match(strip_timestamp(line).trim())
 }
 
 fn make_entry(idx: usize, text: &str, lines: &[&str], context: usize) -> LogEntry {
@@ -199,5 +205,30 @@ mod tests {
         let result = distill(input, 0);
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.warnings.len(), 2);
+    }
+
+    #[test]
+    fn compiler_warning_flags_are_not_diagnostics() {
+        let input = "SwiftCompile normal arm64 /tmp/Foo.swift -Werror=non-modular-include-in-framework-module -Wno-warning";
+        let result = distill(input, 2);
+        assert!(result.errors.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn swift_file_diagnostics_are_preserved() {
+        let input = "/tmp/Foo.swift:12:9: error: cannot find 'value' in scope";
+        let result = distill(input, 2);
+        assert_eq!(result.errors.len(), 1);
+    }
+
+    #[test]
+    fn xcode_compiler_commands_distill_smaller_than_the_input() {
+        let command = "SwiftCompile normal arm64 /tmp/Foo.swift -Werror=non-modular-include-in-framework-module -Wno-warning";
+        let mut lines = vec![command; 100];
+        lines.push("/tmp/Foo.swift:12:9: error: cannot find 'value' in scope");
+        let input = lines.join("\n");
+        let output = serde_json::to_string(&distill(&input, 2)).expect("serialize distilled log");
+        assert!(output.len() < input.len());
     }
 }
