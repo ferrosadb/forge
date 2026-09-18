@@ -16,8 +16,8 @@ use anyhow::{anyhow, Context, Result};
 use uuid::Uuid;
 
 use crate::schema::{
-    ALTER_TASKS_ADD_COLUMNS, BOARD_KEYSPACE, CREATE_TASKS_TABLE, CREATE_TASK_COMMENTS_TABLE,
-    CREATE_TASK_LINKS_TABLE,
+    added_column_name, classify_schema_failure, missing_board_tables, ALTER_TASKS_ADD_COLUMNS,
+    BOARD_KEYSPACE, CREATE_TASKS_TABLE, CREATE_TASK_COMMENTS_TABLE, CREATE_TASK_LINKS_TABLE,
 };
 use crate::types::{
     Comment, CreateTaskRequest, KanbanBoard, KanbanColumns, Task, TaskFilter, TaskOrigin,
@@ -209,12 +209,17 @@ impl TaskStore {
             session,
             tenant_id: tenant_id.unwrap_or(TENANT_ID).to_string(),
         };
-        store.ensure_schema().with_context(|| {
-            format!(
-                "connected to {contacted}, but the task board keyspace '{BOARD_KEYSPACE}' is not \
-                 usable there -- create the keyspace, or point the board at the database that \
-                 holds it"
-            )
+        // Report the cause the cluster actually gave. The previous wording told
+        // every failure that the keyspace was not usable and to create it --
+        // advice that is wrong for a timeout, wrong for a permission problem,
+        // and points at a keyspace holding thousands of live rows.
+        store.ensure_schema().map_err(|error| {
+            let failure = classify_schema_failure(&format!("{error:#}"));
+            error.context(format!(
+                "connected to {contacted}, but could not verify the task board schema in \
+                 '{BOARD_KEYSPACE}' -- {}",
+                failure.advice()
+            ))
         })?;
         Ok(store)
     }
@@ -239,12 +244,72 @@ impl TaskStore {
     }
 
     /// Create the three task tables if they don't exist (idempotent).
+    /// Names of the board's tables that this keyspace already holds.
+    ///
+    /// A local read of `system_schema`, not a cluster-wide agreement. This is
+    /// what lets the steady state issue no DDL at all.
+    fn present_board_tables(&self) -> Result<Vec<String>> {
+        let cql = format!(
+            "SELECT table_name FROM system_schema.tables WHERE keyspace_name = '{BOARD_KEYSPACE}'"
+        );
+        let result = cql_exec!(self.rt, &self.session, cql)
+            .context("ensure_schema: read system_schema.tables")?
+            .into_legacy_result()
+            .context("ensure_schema: legacy result")?;
+        let rows = result
+            .rows()
+            .context("ensure_schema: expected system_schema.tables rows")?;
+        let mut present = Vec::new();
+        for row in rows {
+            let (name,): (String,) = row
+                .into_typed()
+                .context("ensure_schema: parse system_schema.tables row")?;
+            present.push(name);
+        }
+        Ok(present)
+    }
+
+    /// Whether the `tasks` table already carries `column`.
+    fn tasks_column_exists(&self, column: &str) -> Result<bool> {
+        let cql = format!(
+            "SELECT column_name FROM system_schema.columns WHERE keyspace_name = \
+             '{BOARD_KEYSPACE}' AND table_name = 'tasks'"
+        );
+        let result = cql_exec!(self.rt, &self.session, cql)
+            .context("ensure_schema: read system_schema.columns")?
+            .into_legacy_result()
+            .context("ensure_schema: legacy result")?;
+        let rows = result
+            .rows()
+            .context("ensure_schema: expected system_schema.columns rows")?;
+        for row in rows {
+            let (name,): (String,) = row
+                .into_typed()
+                .context("ensure_schema: parse system_schema.columns row")?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Create only what is missing.
+    ///
+    /// This used to run three `CREATE TABLE IF NOT EXISTS` and every `ALTER` on
+    /// EVERY connect, including a read-only `task list`. Schema DDL goes through
+    /// cluster consensus, so one loaded or degraded cluster failed the entire
+    /// board on statements whose answer was always "already exists" -- and the
+    /// board is opened once per command. Reading `system_schema` first is local:
+    /// an installed board issues no DDL, and a fresh one still gets its schema.
     fn ensure_schema(&self) -> Result<()> {
-        for stmt in [
-            CREATE_TASKS_TABLE,
-            CREATE_TASK_LINKS_TABLE,
-            CREATE_TASK_COMMENTS_TABLE,
-        ] {
+        let present = self.present_board_tables()?;
+        for table in missing_board_tables(&present) {
+            let stmt = match table {
+                "tasks" => CREATE_TASKS_TABLE,
+                "task_links" => CREATE_TASK_LINKS_TABLE,
+                "task_comments" => CREATE_TASK_COMMENTS_TABLE,
+                other => anyhow::bail!("ensure_schema: no CREATE statement for '{other}'"),
+            };
             cql_exec!(self.rt, &self.session, stmt.to_string())
                 .with_context(|| format!("ensure_schema: {}", first_line(stmt)))?;
         }
@@ -254,12 +319,20 @@ impl TaskStore {
         // so without this the first read after an upgrade fails on a column
         // the deployed table does not have.
         //
-        // "Already exists" is the expected answer from the second connect
-        // onward and is not an error. Anything else is: a column that silently
-        // failed to appear would take the whole board down on the next read,
-        // which is exactly the failure this exists to prevent.
+        // Asked of system_schema rather than attempted-and-forgiven, for the
+        // same reason as the tables above: the common answer is "it is already
+        // there", and that answer should not cost a consensus round.
         for stmt in ALTER_TASKS_ADD_COLUMNS {
+            let Some(column) = added_column_name(stmt) else {
+                anyhow::bail!("ensure_schema: cannot read the column name out of '{stmt}'");
+            };
+            if self.tasks_column_exists(column)? {
+                continue;
+            }
             if let Err(error) = cql_exec!(self.rt, &self.session, stmt.to_string()) {
+                // A concurrent connect may have added it between the read and
+                // the write. Anything else is real: a column that silently
+                // failed to appear takes the board down on the next read.
                 let text = format!("{error:#}").to_lowercase();
                 let already = text.contains("already exist")
                     || text.contains("conflicts with an existing column")
