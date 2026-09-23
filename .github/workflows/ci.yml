@@ -28,11 +28,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-04-25
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && runner.environment == 'github-hosted' }}
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy (warnings as errors)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   build-test:
     name: Build & Test
@@ -41,23 +43,25 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-04-25
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && runner.environment == 'github-hosted' }}
       - name: Build workspace
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --all-features
       - name: Anti-loop contract tests
         run: |
-          cargo test -p forge-checklist-state
-          cargo test -p forge --test checklist
-          cargo test -p forge-mcp-server
+          cargo test -p forge-checklist-state --all-features
+          cargo test -p forge --all-features --test checklist
+          cargo test -p forge-mcp-server --all-features
       - name: MCP draft conformance tests
         run: |
-          cargo test -p forge-mcp-server --lib stdio_server_discover
-          cargo test -p forge-mcp-server --lib http_
-          cargo test -p forge-fmem-client --lib protocol::tests::encode_mcp_header_value
-          cargo test -p forge-fmem-client --lib transport::http::tests::http_call_sends_modern_accept_and_encoded_name_headers
-          cargo test -p forge-fmem-client --lib tools::handshake
+          cargo test -p forge-mcp-server --all-features --lib stdio_server_discover
+          cargo test -p forge-mcp-server --all-features --lib http_
+          cargo test -p forge-fmem-client --all-features --lib protocol::tests::encode_mcp_header_value
+          cargo test -p forge-fmem-client --all-features --lib transport::http::tests::http_call_sends_modern_accept_and_encoded_name_headers
+          cargo test -p forge-fmem-client --all-features --lib tools::handshake
       - name: Test workspace
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
       - name: Build release CLI smoke
         run: |
           cargo build --release --bin frg
@@ -73,7 +77,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-04-25
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && runner.environment == 'github-hosted' }}
       - name: Install cargo-llvm-cov
         run: cargo install --locked cargo-llvm-cov --version 0.8.4
       - name: Measure workspace coverage
@@ -116,9 +122,11 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-04-25
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && runner.environment == 'github-hosted' }}
       - name: Build docs with warnings denied
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -128,7 +136,9 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-04-25
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && runner.environment == 'github-hosted' }}
       - name: Install cargo-deny
         run: cargo install --locked cargo-deny
       - name: Check advisories + licenses + bans + sources
