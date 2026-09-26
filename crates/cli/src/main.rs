@@ -1335,6 +1335,98 @@ fn filter_output(
     }
 }
 
+/// Format the one-line stderr status summary that always follows `frg run`.
+/// `exit_code == 0` prints "ok", anything else prints "FAIL". `cmd` is
+/// truncated to ~120 chars so the line stays greppable for long invocations.
+fn status_line(
+    exit_code: i32,
+    ms: u64,
+    filter: &str,
+    cmd: &str,
+    lock_wait: bool,
+    raw_path: Option<&str>,
+) -> String {
+    const CMD_MAX: usize = 120;
+    let status = if exit_code == 0 { "ok" } else { "FAIL" };
+    let truncated: String = if cmd.chars().count() > CMD_MAX {
+        let mut s: String = cmd.chars().take(CMD_MAX - 3).collect();
+        s.push_str("...");
+        s
+    } else {
+        cmd.to_string()
+    };
+    let mut line =
+        format!("frg: {status} exit={exit_code} ms={ms} filter={filter} cmd=\"{truncated}\"");
+    if lock_wait {
+        line.push_str(" lock_wait=yes");
+    }
+    if let Some(path) = raw_path {
+        line.push_str(&format!(" raw={path}"));
+    }
+    line
+}
+
+/// True when raw command output contains cargo's "waiting for file lock"
+/// message (build directory or package cache) — agents otherwise misread a
+/// lock wait as a hang.
+fn saw_cargo_lock_wait(raw: &str) -> bool {
+    raw.contains("Blocking waiting for file lock on build directory")
+        || raw.contains("Blocking waiting for file lock on package cache")
+}
+
+/// Inputs for [`track_run_outcome`], grouped so the tracker stays one small
+/// function instead of a long positional-argument list.
+struct RunOutcome<'a> {
+    full_cmd: &'a str,
+    filter: &'a str,
+    input_bytes: usize,
+    output_bytes: usize,
+    exit_code: i32,
+    duration_ms: u64,
+    filter_ok: bool,
+    filter_err: Option<&'a str>,
+    project_dir: Option<&'a str>,
+}
+
+/// Best-effort token-savings tracking for `frg run`. Never fails the wrapped
+/// command: on the first tracking failure in this process, emits exactly one
+/// `frg: tracking disabled: <error>` line to stderr instead of dropping the
+/// error silently.
+fn track_run_outcome(o: &RunOutcome) {
+    let outcome: anyhow::Result<()> = (|| {
+        let db_path = forge_shared::tracking::default_db_path()?;
+        let conn = forge_shared::tracking::open_db(&db_path)?;
+        forge_shared::tracking::record(
+            &conn,
+            o.full_cmd,
+            o.filter,
+            o.input_bytes,
+            o.output_bytes,
+            o.exit_code,
+        )?;
+        forge_shared::tracking::record_filter(
+            &conn,
+            &forge_shared::tracking::FilterRecord {
+                command: o.full_cmd,
+                filter_name: o.filter,
+                mode: forge_shared::tracking::InvocationMode::Run,
+                project_dir: o.project_dir,
+                input_bytes: o.input_bytes,
+                output_bytes: o.output_bytes,
+                duration_ms: o.duration_ms,
+                filter_success: o.filter_ok,
+                error_message: o.filter_err,
+                exit_code: o.exit_code,
+                tool_version: env!("CARGO_PKG_VERSION"),
+            },
+        )?;
+        Ok(())
+    })();
+    if let Err(e) = outcome {
+        eprintln!("frg: tracking disabled: {e}");
+    }
+}
+
 /// Generate Claude Code hook configuration JSON using the thin delegator pattern.
 fn generate_hook_config() -> serde_json::Value {
     serde_json::json!({
@@ -4849,8 +4941,11 @@ fn main() -> anyhow::Result<()> {
                 .ok()
                 .map(|p| p.display().to_string());
 
+            let wall_clock = std::time::Instant::now();
             let (raw_output, exit_code) = run_command(&args)?;
+            let wall_ms = wall_clock.elapsed().as_millis() as u64;
             let input_bytes = raw_output.len();
+            let lock_wait = saw_cargo_lock_wait(&raw_output);
 
             // Detect and apply the appropriate filter (with fallback)
             let fr = filter_output(&registry, &full_cmd, &raw_output, cli.pretty);
@@ -4867,43 +4962,42 @@ fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
+            let raw_path_str = tee_path.as_ref().map(|p| p.display().to_string());
 
-            // Print filtered output
+            // Print filtered output — unchanged from prior behavior, byte for byte.
             print!("{}", filtered);
 
-            // Show tee path if saved
-            if let Some(path) = &tee_path {
-                eprintln!("[raw output saved: {}]", path.display());
-            }
+            // Track token savings; a tracking failure never fails the wrapped command.
+            track_run_outcome(&RunOutcome {
+                full_cmd: &full_cmd,
+                filter: &filter,
+                input_bytes,
+                output_bytes,
+                exit_code,
+                duration_ms,
+                filter_ok,
+                filter_err: filter_err.as_deref(),
+                project_dir: project_dir.as_deref(),
+            });
 
-            // Track token savings (both legacy and detailed)
-            if let Ok(db_path) = forge_shared::tracking::default_db_path() {
-                if let Ok(conn) = forge_shared::tracking::open_db(&db_path) {
-                    let _ = forge_shared::tracking::record(
-                        &conn,
-                        &full_cmd,
-                        &filter,
-                        input_bytes,
-                        output_bytes,
+            // Exactly one status line on stderr so agents can tell "passed"
+            // from "hung/no output" without polling or re-running. Opt out
+            // with FRG_RUN_STATUS=0 for scripts that need clean stderr.
+            let status_enabled = std::env::var("FRG_RUN_STATUS")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+            if status_enabled {
+                eprintln!(
+                    "{}",
+                    status_line(
                         exit_code,
-                    );
-                    let _ = forge_shared::tracking::record_filter(
-                        &conn,
-                        &forge_shared::tracking::FilterRecord {
-                            command: &full_cmd,
-                            filter_name: &filter,
-                            mode: forge_shared::tracking::InvocationMode::Run,
-                            project_dir: project_dir.as_deref(),
-                            input_bytes,
-                            output_bytes,
-                            duration_ms,
-                            filter_success: filter_ok,
-                            error_message: filter_err.as_deref(),
-                            exit_code,
-                            tool_version: env!("CARGO_PKG_VERSION"),
-                        },
-                    );
-                }
+                        wall_ms,
+                        &filter,
+                        &full_cmd,
+                        lock_wait,
+                        raw_path_str.as_deref(),
+                    )
+                );
             }
 
             // Preserve original exit code
@@ -6466,5 +6560,84 @@ mod token_bloat_tests {
         assert!(post_hooks
             .iter()
             .all(|hook| hook["matcher"].as_str() != Some("Bash")));
+    }
+}
+
+#[cfg(test)]
+mod run_status_line_tests {
+    use super::{saw_cargo_lock_wait, status_line};
+
+    #[test]
+    fn ok_line_has_no_optional_fields() {
+        let line = status_line(0, 12345, "cargo_test", "cargo test -p x", false, None);
+        assert_eq!(
+            line,
+            "frg: ok exit=0 ms=12345 filter=cargo_test cmd=\"cargo test -p x\""
+        );
+    }
+
+    #[test]
+    fn fail_line_reports_nonzero_exit() {
+        let line = status_line(101, 42, "build", "cargo build", false, None);
+        assert_eq!(
+            line,
+            "frg: FAIL exit=101 ms=42 filter=build cmd=\"cargo build\""
+        );
+    }
+
+    #[test]
+    fn lock_wait_is_appended_when_present() {
+        let line = status_line(0, 1, "clippy", "cargo clippy", true, None);
+        assert!(line.ends_with(" lock_wait=yes"));
+    }
+
+    #[test]
+    fn raw_path_is_appended_when_tee_saved_output() {
+        let line = status_line(1, 1, "build", "cargo build", false, Some("/tmp/raw.log"));
+        assert!(line.ends_with(" raw=/tmp/raw.log"));
+    }
+
+    #[test]
+    fn lock_wait_and_raw_path_can_both_be_present() {
+        let line = status_line(1, 1, "build", "cargo build", true, Some("/tmp/raw.log"));
+        assert!(line.contains(" lock_wait=yes raw=/tmp/raw.log"));
+    }
+
+    #[test]
+    fn long_cmd_is_truncated_to_about_120_chars() {
+        let long_cmd = "a".repeat(200);
+        let line = status_line(0, 1, "build", &long_cmd, false, None);
+        // cmd="<117 chars>..." -> exactly 120 chars between the quotes
+        let start = line.find("cmd=\"").unwrap() + "cmd=\"".len();
+        let end = line.rfind('"').unwrap();
+        assert_eq!(end - start, 120);
+        assert!(line[start..end].ends_with("..."));
+    }
+
+    #[test]
+    fn short_cmd_is_not_truncated() {
+        let line = status_line(0, 1, "build", "short", false, None);
+        assert!(line.contains("cmd=\"short\""));
+    }
+
+    #[test]
+    fn detects_build_directory_lock_wait_message() {
+        assert!(saw_cargo_lock_wait(
+            "Blocking waiting for file lock on build directory\n"
+        ));
+    }
+
+    #[test]
+    fn detects_package_cache_lock_wait_message() {
+        assert!(saw_cargo_lock_wait(
+            "Blocking waiting for file lock on package cache\n"
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_unrelated_output_as_lock_wait() {
+        assert!(!saw_cargo_lock_wait(
+            "Compiling forge v0.1.0\nrunning 3 tests\n"
+        ));
     }
 }

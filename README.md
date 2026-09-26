@@ -200,6 +200,21 @@ Each wrapper parses native output into structured JSON with error locations, war
 | `frg run python <cmd>` | `test`, `lint`, `format_check`, `deps`, `typecheck` |
 | `frg run mix <cmd>` | `compile`, `test`, `format_check`, `deps` |
 
+Every `frg run` invocation — the wrappers above and the generic
+`frg run [--tee] [--list-filters] -- <cmd>` passthrough — ends with exactly one
+status line on stderr, independent of the (sometimes empty) filtered stdout:
+
+```
+frg: ok exit=0 ms=12345 filter=cargo_test cmd="cargo test -p x"
+frg: FAIL exit=101 ms=842 filter=build cmd="cargo build"
+```
+
+`lock_wait=yes` is appended when the raw output contained cargo's "Blocking
+waiting for file lock on build directory" / "...on package cache" message, so
+a lock wait isn't misread as a hang. `raw=<path>` is appended instead of a
+separate line when `--tee` saved the raw output on failure. Set
+`FRG_RUN_STATUS=0` to suppress the line for scripts that need clean stderr.
+
 ### Analytics and hooks
 
 | Command | Description |
