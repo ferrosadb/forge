@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- **`frg run` always ends with one status line on stderr.** Every `frg run`
+  invocation now prints exactly one `frg: ok|FAIL exit=<code> ms=<duration>
+  filter=<name> cmd="<cmd>"` line to stderr, so agents can tell "passed with
+  no output" from "hung" without polling or re-running. Adds `lock_wait=yes`
+  when cargo's "waiting for file lock" message appears in the raw output, and
+  `raw=<path>` when `--tee` saved raw output (replacing the old, separate
+  `[raw output saved: ...]` line). Filtered stdout is unchanged. Opt out with
+  `FRG_RUN_STATUS=0`.
+
+### Fixed
+
+- **Tracking failures are no longer silent.** `frg run`'s best-effort
+  token-savings tracking now emits a single `frg: tracking disabled: <error>`
+  line on stderr on failure instead of dropping the error.
+
 ## [0.18.0] - 2026-08-27
 
 ### Added
