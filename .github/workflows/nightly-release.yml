@@ -11,6 +11,17 @@ name: Nightly release
 # Mirrors ferrosa's nightly-release.yml, which is where this scheme comes from.
 
 on:
+  # Release-on-merge: every push to `main` (a merged PR) cuts a release, so a
+  # merge reaches the installer's bundle the same day instead of waiting for
+  # 00:25 UTC. The `should_release` guard below skips when nothing has landed
+  # since the last tag, so a doc-only merge cuts nothing.
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'specs/**'
+      - 'docs/**'
   schedule:
     - cron: '25 0 * * *'
   workflow_dispatch:
