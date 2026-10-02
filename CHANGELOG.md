@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cognitive complexity analysis (`frg cognitive-complexity`).** Ranks Rust
+  functions by [SonarSource cognitive complexity][cog], computed from the AST via
+  the `complexity` crate. Cyclomatic complexity counts branches; cognitive
+  complexity scores what a reader actually holds in their head, so nesting is
+  penalised and a wide `match` stays cheap. `--max-cognitive` sets the floor,
+  `--top N` caps the list (default 100, `0` = no limit), and `--exclude-tests`
+  skips test functions. Reported per function: score, nesting depth, line span,
+  severity band, and file/line. Bands are calibrated against measured Rust
+  codebases — across ~186k functions in a large multi-crate suite the
+  distribution is p50 = 0, p90 = 7, p95 = 13, p99 = 40 — so moderate/high/severe
+  land at 10/20/40 (roughly 7%/3%/1% of functions) and the result is a target
+  list rather than a finding dump. The report also publishes those percentiles
+  so a caller can see whether their codebase is denser than the calibration set.
+- **`cognitive_complexity` MCP tool**, exposing the same ranking to agents
+  (`churn` / `churn_since` enable the churn weighting).
+- **Churn-weighted file targets (`--churn`).** Complexity says what is hard to
+  read; churn says what you keep touching, and a file that is both is where
+  refactoring actually pays. Adds a `file_hotspots` ranking across files with
+  `hotspot_score = cognitive_total x (1 + ln(1 + commits))`, read from real git
+  history (`--churn-since` sets the window, default 12 months). The factor is
+  1.0 for unchanged files — a complex file nobody edits keeps its complexity and
+  loses only the amplification — so churn re-orders equally complex files rather
+  than swamping complexity. File totals are computed from the uncapped scan, so
+  a file's score never depends on the function-level `--top` cut.
+- **Cognitive complexity in `frg smell-detect`.** Rust files gain an AST-based
+  `HighCognitiveComplexity` finding alongside the existing regex cyclomatic and
+  nesting checks; `--max-cognitive` controls its threshold.
+- **`frg dsm analyze --with-cognitive`.** Attributes cognitive hot spots onto
+  DSM elements, emits `ReduceCognitiveComplexity` refactoring suggestions with
+  function-level evidence, and promotes structural suggestions (cycles, god
+  elements) that sit inside a cognitively dense element — the combination that
+  makes a refactor high-value rather than merely tidy.
+
+### Fixed
+
+- **A `c"..."` C-string literal no longer kills a whole scan.** `syn` 1 panics
+  rather than erroring on syntax it cannot represent, and C-string literals
+  (valid since Rust 1.77) are one of those cases. A single such file aborted the
+  entire run and produced no report at all — a full-repository scan of a
+  ~14k-file Rust workspace died silently. Parsing is now isolated per file: the
+  file is disclosed as a `Parse` failure and every other file still scores.
+
+[cog]: https://www.sonarsource.com/docs/CognitiveComplexity.pdf
+
 - **`frg run` always ends with one status line on stderr.** Every `frg run`
   invocation now prints exactly one `frg: ok|FAIL exit=<code> ms=<duration>
   filter=<name> cmd="<cmd>"` line to stderr, so agents can tell "passed with

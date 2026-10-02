@@ -1,6 +1,12 @@
 //! Code smell detection using line/brace/regex heuristics.
 //!
 //! Operates on individual source files. Use with `ignore` crate for directory walks.
+//!
+//! Rust files additionally get an AST-based *cognitive* complexity pass from
+//! `forge-cognitive-complexity`, which scores nesting the way a reader
+//! experiences it. The regex pass below reports cyclomatic complexity for every
+//! supported language; the two are complementary signals and are reported as
+//! distinct smell kinds.
 
 use regex::Regex;
 use serde::Serialize;
@@ -24,6 +30,9 @@ pub struct Smell {
 pub enum SmellKind {
     LongFunction,
     HighComplexity,
+    /// Cognitive complexity (SonarSource) above the configured threshold.
+    /// Rust only; computed from the AST, so nesting is scored properly.
+    HighCognitiveComplexity,
     DeepNesting,
     LargeParameterList,
     TodoFixme,
@@ -47,6 +56,9 @@ pub struct DetectConfig {
     pub max_cc: usize,
     pub max_nesting: usize,
     pub max_params: usize,
+    /// Cognitive complexity threshold for Rust files. Functions at or above
+    /// this are reported as `HighCognitiveComplexity`.
+    pub max_cognitive: u32,
 }
 
 impl Default for DetectConfig {
@@ -56,6 +68,7 @@ impl Default for DetectConfig {
             max_cc: 15,
             max_nesting: 4,
             max_params: 5,
+            max_cognitive: forge_cognitive_complexity::HIGH_THRESHOLD,
         }
     }
 }
@@ -133,10 +146,54 @@ pub fn detect(filename: &str, source: &str, config: &DetectConfig) -> SmellRepor
     // 12-factor config smells: hardcoded prompts, model IDs, API URLs
     detect_config_smells(&lines, &mut smells);
 
+    // AST-based cognitive complexity (Rust only).
+    detect_cognitive_smells(filename, source, config, &mut smells);
+
     SmellReport {
         file: filename.to_string(),
         total_lines,
         smells,
+    }
+}
+
+/// Cognitive complexity (SonarSource) for Rust files.
+///
+/// The regex cyclomatic pass above counts branches flatly and is fooled by
+/// string/comment content. This pass parses the AST, so nesting is scored the
+/// way a reader experiences it and a wide `match` stays cheap.
+///
+/// Non-Rust files and files that do not parse are skipped silently *here* —
+/// the caller sees them via `--max-cc`/`frg cognitive-complexity`, and
+/// `frg cognitive-complexity` reports parse failures explicitly. A parse
+/// failure must never invent a smell.
+fn detect_cognitive_smells(
+    filename: &str,
+    source: &str,
+    config: &DetectConfig,
+    smells: &mut Vec<Smell>,
+) {
+    if !filename.ends_with(".rs") {
+        return;
+    }
+
+    let cognitive = forge_cognitive_complexity::CognitiveConfig::default();
+    let report = forge_cognitive_complexity::analyze_source(filename, source, &cognitive);
+    if report.files_analyzed == 0 {
+        return;
+    }
+
+    for function in &report.functions {
+        if function.cognitive >= config.max_cognitive {
+            smells.push(Smell {
+                kind: SmellKind::HighCognitiveComplexity,
+                line: function.line,
+                function: function.name.clone(),
+                detail: format!(
+                    "cognitive={} (max {}), nesting={}",
+                    function.cognitive, config.max_cognitive, function.nesting
+                ),
+            });
+        }
     }
 }
 
@@ -895,6 +952,7 @@ mod tests {
             max_cc: 1,
             max_nesting: 0,
             max_params: 0,
+            ..DetectConfig::default()
         };
         let result = detect("test.rs", source, &strict);
         assert!(!result.smells.is_empty());
@@ -1216,5 +1274,159 @@ Hello world
             found.is_none(),
             "short strings without prompt keywords should not flag"
         );
+    }
+
+    // --- Cognitive complexity (AST-based, Rust only) ---
+
+    #[test]
+    fn detects_high_cognitive_complexity_in_rust() {
+        let source = r#"
+fn gnarly(xs: &[u32]) -> u32 {
+    let mut total = 0;
+    for x in xs {
+        if *x > 1 {
+            for y in 0..*x {
+                for z in 0..y {
+                    if z % 2 == 0 {
+                        total += z;
+                    }
+                }
+            }
+        }
+    }
+    total
+}
+"#;
+        let config = DetectConfig {
+            max_cognitive: 5,
+            ..DetectConfig::default()
+        };
+        let result = detect("test.rs", source, &config);
+        let found = result
+            .smells
+            .iter()
+            .find(|s| s.kind == SmellKind::HighCognitiveComplexity)
+            .expect("nested control flow should be a cognitive hotspot");
+        assert_eq!(found.function, "gnarly");
+        assert!(found.detail.contains("cognitive="), "{}", found.detail);
+        assert!(found.detail.contains("nesting="), "{}", found.detail);
+    }
+
+    /// The threshold is the knob; the calibration default is not what this test
+    /// is about, so pin it explicitly.
+    #[test]
+    fn cognitive_threshold_gates_the_finding() {
+        let source = r#"
+fn gnarly(xs: &[u32]) -> u32 {
+    let mut total = 0;
+    for x in xs {
+        if *x > 1 {
+            for y in 0..*x {
+                for z in 0..y {
+                    if z % 2 == 0 {
+                        total += z;
+                    }
+                }
+            }
+        }
+    }
+    total
+}
+"#;
+        let above = DetectConfig {
+            max_cognitive: 5,
+            ..DetectConfig::default()
+        };
+        assert!(
+            detect("test.rs", source, &above)
+                .smells
+                .iter()
+                .any(|s| s.kind == SmellKind::HighCognitiveComplexity),
+            "a low threshold flags the nested function"
+        );
+
+        let way_above = DetectConfig {
+            max_cognitive: 500,
+            ..DetectConfig::default()
+        };
+        assert!(
+            !detect("test.rs", source, &way_above)
+                .smells
+                .iter()
+                .any(|s| s.kind == SmellKind::HighCognitiveComplexity),
+            "a threshold above the score does not flag"
+        );
+    }
+
+    /// A wide `match` is cyclomatic-expensive but cognitively cheap: it is the
+    /// clearest case where the AST metric beats the regex metric.
+    #[test]
+    fn wide_match_is_not_a_cognitive_smell() {
+        let mut source = String::from("fn wide(n: u32) -> u32 {\n    match n {\n");
+        for i in 0..30 {
+            source.push_str(&format!("        {i} => {i},\n"));
+        }
+        source.push_str("        _ => 0,\n    }\n}\n");
+
+        let result = detect("test.rs", &source, &DetectConfig::default());
+        let cognitive = result
+            .smells
+            .iter()
+            .filter(|s| s.kind == SmellKind::HighCognitiveComplexity)
+            .count();
+        assert_eq!(cognitive, 0, "a flat match is easy to read");
+    }
+
+    #[test]
+    fn cognitive_threshold_is_configurable() {
+        let source = r#"
+fn modest(xs: &[u32]) -> u32 {
+    let mut t = 0;
+    for x in xs {
+        if *x > 0 {
+            t += x;
+        }
+    }
+    t
+}
+"#;
+        let lenient = DetectConfig {
+            max_cognitive: 100,
+            ..DetectConfig::default()
+        };
+        assert!(!detect("test.rs", source, &lenient)
+            .smells
+            .iter()
+            .any(|s| s.kind == SmellKind::HighCognitiveComplexity));
+
+        let strict = DetectConfig {
+            max_cognitive: 2,
+            ..DetectConfig::default()
+        };
+        assert!(detect("test.rs", source, &strict)
+            .smells
+            .iter()
+            .any(|s| s.kind == SmellKind::HighCognitiveComplexity));
+    }
+
+    #[test]
+    fn non_rust_files_get_no_cognitive_pass() {
+        // Python is not parsed by the Rust AST pass, so a nested python
+        // function must not produce HighCognitiveComplexity.
+        let source = "def gnarly(xs):\n    for x in xs:\n        if x:\n            for y in xs:\n                if y:\n                    pass\n";
+        let result = detect("test.py", source, &DetectConfig::default());
+        assert!(!result
+            .smells
+            .iter()
+            .any(|s| s.kind == SmellKind::HighCognitiveComplexity));
+    }
+
+    #[test]
+    fn unparsable_rust_does_not_invent_cognitive_smells() {
+        let result = detect("broken.rs", "fn broken( { ", &DetectConfig::default());
+        assert!(!result
+            .smells
+            .iter()
+            .any(|s| s.kind == SmellKind::HighCognitiveComplexity));
     }
 }

@@ -18,6 +18,9 @@ pub enum SuggestionKind {
     CreateModuleBoundary,
     InternalizeDetail,
     ExtractSharedKernel,
+    /// Split a function that is hard to follow (high cognitive complexity),
+    /// optionally inside an element that also has structural problems.
+    ReduceCognitiveComplexity,
 }
 
 /// Priority level.
@@ -60,6 +63,27 @@ pub fn generate_suggestions(
     partition: &PartitionResult,
     directed: Option<&DirectedResult>,
 ) -> Vec<Suggestion> {
+    generate_suggestions_with_cognitive(
+        matrix, cycles, clusters, metrics, partition, directed, None,
+    )
+}
+
+/// Generate refactoring suggestions, folding in cognitive hot spots when a
+/// cognitive scan has been run.
+///
+/// A structural problem (cycle, god element) inside an element that is also
+/// cognitively dense is a stronger refactoring signal than either alone, so
+/// those suggestions are raised in priority and their evidence line names the
+/// hot spot responsible.
+pub fn generate_suggestions_with_cognitive(
+    matrix: &DsmMatrix,
+    cycles: &CycleInfo,
+    clusters: &ClusterResult,
+    metrics: &DsmMetrics,
+    partition: &PartitionResult,
+    directed: Option<&DirectedResult>,
+    cognitive: Option<&crate::hotspots::CognitiveSummary>,
+) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
 
     // 1. Cycle-breaking suggestions
@@ -79,10 +103,118 @@ pub fn generate_suggestions(
         suggest_from_directed(dir, &mut suggestions);
     }
 
+    // 6. Cognitive-complexity suggestions (function-level evidence)
+    let mut cognitive_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(summary) = cognitive {
+        cognitive_targets = suggest_from_cognitive(summary, &mut suggestions);
+    }
+
+    // Structural problems inside a cognitively dense element are promoted:
+    // the reader is fighting both coupling and density in the same place.
+    // Cognitive suggestions are excluded — they are already ranked by their own
+    // severity, and promoting them here would double-count their score.
+    if !cognitive_targets.is_empty() {
+        for suggestion in suggestions.iter_mut() {
+            if suggestion.kind == SuggestionKind::ReduceCognitiveComplexity {
+                continue;
+            }
+            if cognitive_targets.contains(&suggestion.source) {
+                suggestion.priority = match suggestion.priority {
+                    Priority::Critical => Priority::Critical,
+                    Priority::High => Priority::Critical,
+                    Priority::Medium => Priority::High,
+                    Priority::Low => Priority::Medium,
+                };
+                suggestion.rationale.push_str(
+                    " — this element also contains a cognitive complexity hot spot, so the refactor is higher value",
+                );
+            }
+        }
+    }
+
     // Sort by priority
     suggestions.sort_by(|a, b| a.priority.cmp(&b.priority));
 
     suggestions
+}
+
+/// Turn cognitive hot spots into refactoring suggestions.
+///
+/// Returns the set of elements that contain a hot spot, for priority promotion.
+fn suggest_from_cognitive(
+    summary: &crate::hotspots::CognitiveSummary,
+    suggestions: &mut Vec<Suggestion>,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashMap;
+
+    // One suggestion per element, citing its worst hot spot; the rest are
+    // summarised in the evidence line so the list stays actionable.
+    let mut worst_per_element: HashMap<&str, Vec<&crate::hotspots::HotspotEvidence>> =
+        HashMap::new();
+    for hot_spot in &summary.hot_spots {
+        worst_per_element
+            .entry(hot_spot.element.as_str())
+            .or_default()
+            .push(hot_spot);
+    }
+
+    let mut targets = std::collections::HashSet::new();
+    for (element, hot_spots) in worst_per_element {
+        let worst = hot_spots
+            .iter()
+            .max_by_key(|h| h.cognitive)
+            .expect("entry exists, so there is at least one hot spot");
+        let others = hot_spots.len() - 1;
+
+        let (priority, effort) = if worst.cognitive >= forge_cognitive_complexity::SEVERE_THRESHOLD
+        {
+            (Priority::High, Effort::Medium)
+        } else if worst.cognitive >= forge_cognitive_complexity::HIGH_THRESHOLD {
+            (Priority::Medium, Effort::Medium)
+        } else {
+            (Priority::Low, Effort::Small)
+        };
+
+        let evidence = if others == 0 {
+            format!(
+                "Cognitive complexity {} (nesting {}) in {} at {}:{}",
+                worst.cognitive, worst.nesting, worst.name, worst.file, worst.line
+            )
+        } else {
+            format!(
+                "Cognitive complexity {} (nesting {}) in {} at {}:{}; {} more hot spot(s) in this element",
+                worst.cognitive,
+                worst.nesting,
+                worst.name,
+                worst.file,
+                worst.line,
+                others
+            )
+        };
+
+        suggestions.push(Suggestion {
+            kind: SuggestionKind::ReduceCognitiveComplexity,
+            priority,
+            source: element.to_string(),
+            target: worst.name.clone(),
+            rationale: format!(
+                "{} is hard to follow (cognitive complexity {}, threshold {})",
+                worst.name,
+                worst.cognitive,
+                forge_cognitive_complexity::MODERATE_THRESHOLD
+            ),
+            impact: format!(
+                "Splitting this function reduces the reading cost of {}",
+                element
+            ),
+            dsm_evidence: evidence,
+            estimated_effort: effort,
+            migration_step: None,
+        });
+        targets.insert(element.to_string());
+    }
+
+    targets
 }
 
 fn suggest_cycle_breaks(matrix: &DsmMatrix, cycles: &CycleInfo, suggestions: &mut Vec<Suggestion>) {
@@ -366,5 +498,166 @@ mod tests {
         for i in 1..suggestions.len() {
             assert!(suggestions[i].priority >= suggestions[i - 1].priority);
         }
+    }
+
+    #[test]
+    fn cognitive_hot_spots_become_suggestions() {
+        let edges = vec![make_edge("crate::engine", "crate::storage")];
+        let m = DsmMatrix::from_edges(&edges);
+        let ci = find_cycles(&m);
+        let cr = cluster(
+            &m,
+            &ClusterConfig {
+                seed: Some(1),
+                ..Default::default()
+            },
+        );
+        let metrics = compute_metrics(&m, &ci, &cr);
+        let part = partition(&m);
+
+        let summary = crate::hotspots::CognitiveSummary {
+            scanned: true,
+            functions_analyzed: 3,
+            failures: 0,
+            hot_spots: vec![crate::hotspots::HotspotEvidence {
+                element: "crate::engine".to_string(),
+                file: "src/engine.rs".to_string(),
+                name: "Engine::run".to_string(),
+                // At/above the severe threshold, which is what drives the High
+                // priority asserted below.
+                cognitive: forge_cognitive_complexity::SEVERE_THRESHOLD,
+                nesting: 4,
+                line: 42,
+            }],
+            unattributed: 0,
+            warnings: vec![],
+        };
+
+        let suggestions = generate_suggestions_with_cognitive(
+            &m,
+            &ci,
+            &cr,
+            &metrics,
+            &part,
+            None,
+            Some(&summary),
+        );
+
+        let found = suggestions
+            .iter()
+            .find(|s| s.kind == SuggestionKind::ReduceCognitiveComplexity)
+            .expect("a cognitive hot spot should produce a suggestion");
+        assert_eq!(found.source, "crate::engine");
+        assert_eq!(found.target, "Engine::run");
+        assert_eq!(found.priority, Priority::High, ">= severe threshold");
+        assert!(
+            found
+                .dsm_evidence
+                .contains(&forge_cognitive_complexity::SEVERE_THRESHOLD.to_string()),
+            "{}",
+            found.dsm_evidence
+        );
+        assert!(
+            found.dsm_evidence.contains("src/engine.rs:42"),
+            "{}",
+            found.dsm_evidence
+        );
+    }
+
+    /// A structural problem inside a cognitively dense element is promoted —
+    /// that combination is the point of the integration.
+    #[test]
+    fn cognitive_density_promotes_structural_suggestions_in_the_same_element() {
+        let edges = vec![
+            make_edge("a", "b"),
+            make_edge("b", "c"),
+            make_edge("c", "a"),
+        ];
+        let m = DsmMatrix::from_edges(&edges);
+        let ci = find_cycles(&m);
+        let cr = cluster(
+            &m,
+            &ClusterConfig {
+                seed: Some(1),
+                ..Default::default()
+            },
+        );
+        let metrics = compute_metrics(&m, &ci, &cr);
+        let part = partition(&m);
+
+        let baseline =
+            generate_suggestions_with_cognitive(&m, &ci, &cr, &metrics, &part, None, None);
+
+        let summary = crate::hotspots::CognitiveSummary {
+            scanned: true,
+            functions_analyzed: 1,
+            failures: 0,
+            hot_spots: vec![crate::hotspots::HotspotEvidence {
+                element: "a".to_string(),
+                file: "a.rs".to_string(),
+                name: "dense".to_string(),
+                cognitive: 30,
+                nesting: 5,
+                line: 1,
+            }],
+            unattributed: 0,
+            warnings: vec![],
+        };
+        let promoted = generate_suggestions_with_cognitive(
+            &m,
+            &ci,
+            &cr,
+            &metrics,
+            &part,
+            None,
+            Some(&summary),
+        );
+
+        let before = baseline
+            .iter()
+            .find(|s| s.source == "a" && s.kind != SuggestionKind::ReduceCognitiveComplexity)
+            .expect("element a has a structural suggestion");
+        let after = promoted
+            .iter()
+            .find(|s| s.source == "a" && s.kind == before.kind)
+            .expect("the same structural suggestion is still present");
+        assert!(
+            after.priority < before.priority,
+            "priority should be promoted (lower enum value = higher priority): {:?} -> {:?}",
+            before.priority,
+            after.priority
+        );
+        assert!(
+            after.rationale.contains("cognitive complexity hot spot"),
+            "{}",
+            after.rationale
+        );
+    }
+
+    #[test]
+    fn no_cognitive_summary_changes_nothing() {
+        let edges = vec![make_edge("a", "b"), make_edge("b", "a")];
+        let m = DsmMatrix::from_edges(&edges);
+        let ci = find_cycles(&m);
+        let cr = cluster(
+            &m,
+            &ClusterConfig {
+                seed: Some(1),
+                ..Default::default()
+            },
+        );
+        let metrics = compute_metrics(&m, &ci, &cr);
+        let part = partition(&m);
+        let legacy = generate_suggestions(&m, &ci, &cr, &metrics, &part, None);
+        let extended =
+            generate_suggestions_with_cognitive(&m, &ci, &cr, &metrics, &part, None, None);
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            serde_json::to_string(&extended).unwrap(),
+            "absent summary is backward compatible"
+        );
+        assert!(!legacy
+            .iter()
+            .any(|s| s.kind == SuggestionKind::ReduceCognitiveComplexity));
     }
 }

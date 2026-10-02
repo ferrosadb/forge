@@ -1,6 +1,7 @@
 use crate::cluster::ClusterResult;
 use crate::cycles::CycleInfo;
 use crate::directed::DirectedResult;
+use crate::hotspots::CognitiveSummary;
 use crate::metrics::DsmMetrics;
 use crate::partition::PartitionResult;
 use crate::suggest::Suggestion;
@@ -29,6 +30,11 @@ pub struct DsmReport {
     pub partition: PartitionResult,
     pub suggestions: Vec<Suggestion>,
     pub directed: Option<DirectedResult>,
+    /// Cognitive complexity hot spots mapped onto elements. Absent unless a
+    /// cognitive scan was requested; a function-level signal complementing the
+    /// element-level DSM view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cognitive: Option<CognitiveSummary>,
 }
 
 /// Render a report in the specified format.
@@ -600,6 +606,7 @@ mod tests {
             partition: part,
             suggestions,
             directed: None,
+            cognitive: None,
         }
     }
 

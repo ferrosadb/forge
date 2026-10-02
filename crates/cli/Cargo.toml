@@ -25,6 +25,7 @@ forge-lint-dedup = { path = "../lint-dedup" }
 forge-log-monitor = { path = "../log-monitor" }
 forge-coverage-gate = { path = "../coverage-gate" }
 forge-smell-detect = { path = "../smell-detect" }
+forge-cognitive-complexity = { path = "../cognitive-complexity" }
 forge-doc-coverage = { path = "../doc-coverage" }
 forge-project-detect = { path = "../project-detect" }
 forge-digest = { path = "../digest" }

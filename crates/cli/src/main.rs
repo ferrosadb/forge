@@ -137,6 +137,33 @@ enum Commands {
         /// Max parameter count before flagging
         #[arg(long, default_value_t = 5)]
         max_params: usize,
+        /// Cognitive complexity threshold for Rust files (AST-based)
+        #[arg(long, default_value_t = forge_cognitive_complexity::HIGH_THRESHOLD)]
+        max_cognitive: u32,
+    },
+
+    /// Rank Rust functions by cognitive complexity to find refactoring targets
+    #[command(name = "cognitive-complexity", visible_alias = "cognitive")]
+    CognitiveComplexity {
+        /// Source files or directories to scan (Rust)
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Only report functions at or above this cognitive complexity
+        #[arg(long)]
+        max_cognitive: Option<u32>,
+        /// Keep only the N worst functions (0 = no limit)
+        #[arg(long, default_value_t = forge_cognitive_complexity::DEFAULT_TOP)]
+        top: usize,
+        /// Skip functions marked as tests (`#[test]`, `#[cfg(test)]` modules)
+        #[arg(long)]
+        exclude_tests: bool,
+        /// Weight files by git churn: a file that is complex AND frequently
+        /// changed is a stronger refactoring target
+        #[arg(long)]
+        churn: bool,
+        /// Churn history window for `--churn` (git `--since` value)
+        #[arg(long, default_value = "12 months ago")]
+        churn_since: String,
     },
 
     /// Check documentation coverage for public APIs
@@ -968,6 +995,10 @@ enum DsmAction {
         /// Detect cross-language FFI/IPC calls
         #[arg(long)]
         cross_language: bool,
+        /// Also rank cognitive complexity hot spots and fold them into the
+        /// refactoring suggestions
+        #[arg(long)]
+        with_cognitive: bool,
     },
     /// Generate refactoring suggestions from analysis results (stdin: JSON report)
     Suggest {
@@ -1466,7 +1497,6 @@ fn handle_dsm(action: DsmAction, pretty: bool) -> anyhow::Result<()> {
     use forge_dsm_analyze::metrics::compute_metrics;
     use forge_dsm_analyze::partition::partition;
     use forge_dsm_analyze::report::{render, DsmReport, OutputFormat};
-    use forge_dsm_analyze::suggest::generate_suggestions;
 
     fn parse_level(s: &str) -> GranularityLevel {
         match s {
@@ -1538,6 +1568,7 @@ fn handle_dsm(action: DsmAction, pretty: bool) -> anyhow::Result<()> {
             seed,
             format,
             cross_language,
+            with_cognitive,
         } => {
             let config = ExtractConfig {
                 level: parse_level(&level),
@@ -1583,13 +1614,23 @@ fn handle_dsm(action: DsmAction, pretty: bool) -> anyhow::Result<()> {
             };
 
             // Suggestions
-            let suggestions = generate_suggestions(
+            //
+            // Cognitive hot spots are attributed onto the same element labels
+            // the matrix uses, so `--with-cognitive` reuses these suggestions
+            // rather than producing a separate list.
+            let cognitive = if with_cognitive {
+                Some(forge_dsm_analyze::hotspots::collect(&dir, &matrix.labels))
+            } else {
+                None
+            };
+            let suggestions = forge_dsm_analyze::suggest::generate_suggestions_with_cognitive(
                 &matrix,
                 &cycles,
                 &clusters,
                 &metrics,
                 &part,
                 directed.as_ref(),
+                cognitive.as_ref(),
             );
 
             // Build report
@@ -1608,6 +1649,7 @@ fn handle_dsm(action: DsmAction, pretty: bool) -> anyhow::Result<()> {
                 partition: part,
                 suggestions,
                 directed,
+                cognitive,
             };
 
             let output_format = parse_format(&format);
@@ -2147,6 +2189,92 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
             }
 
             serde_json::to_string_pretty(&reports).map_err(|e| e.to_string())
+        }
+    );
+
+    // cognitive_complexity
+    register_tool!(
+        server,
+        "cognitive_complexity",
+        "Rank Rust functions by cognitive complexity (SonarSource) to find refactoring targets. Use this before refactoring to pick the function that is genuinely hardest to read, during code review to quantify readability, or alongside smell_detect: it parses the AST rather than matching text, so nesting is scored the way a reader experiences it and a wide `match` stays cheap. Returns a ranked JSON report (worst first) with file, line, function name, score, nesting depth, and a severity band, plus explicit counts: functions_analyzed (everything scored), functions_total (everything matching the threshold), returned and truncated, and a failures list for files that could not be parsed. Accepts a single file or an entire directory (scans recursively, respects .gitignore).",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File or directory to scan (Rust). Scans recursively and respects .gitignore when given a directory. Defaults to the current working directory."},
+                "max_cognitive": {"type": "integer", "description": "Only report functions at or above this cognitive complexity. Omit to rank everything, which is usually what you want for finding refactoring targets."},
+                "top": {"type": "integer", "description": "Keep only the N worst functions. Omit to return every match; when set, the response sets truncated=true and still reports the full functions_total."},
+                "exclude_tests": {"type": "boolean", "description": "Skip functions marked as tests (`#[test]` or inside a `#[cfg(test)]` module). Defaults to false."},
+                "churn": {"type": "boolean", "description": "Weight files by git churn: files that are complex AND frequently changed score higher, which is where refactoring actually pays. Adds a `file_hotspots` ranking (score = total cognitive complexity x (1 + ln(1 + commits))). Defaults to false."},
+                "churn_since": {"type": "string", "description": "History window for churn, as a git `--since` value (e.g. '6 months ago', '2025-01-01'). Only used when churn=true. Omit to walk all history."}
+            },
+            "required": ["path"]
+        }),
+        |args| {
+            let path_str = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let config = forge_cognitive_complexity::CognitiveConfig {
+                max_cognitive: args
+                    .get("max_cognitive")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32),
+                // Bounded by default: a large repository would otherwise return
+                // tens of thousands of entries. `truncated` and the counts
+                // disclose the full population, so nothing is hidden.
+                top: Some(
+                    args.get("top")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize)
+                        .unwrap_or(forge_cognitive_complexity::DEFAULT_TOP),
+                ),
+                exclude_tests: args
+                    .get("exclude_tests")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            };
+            let report =
+                forge_cognitive_complexity::analyze_path(std::path::Path::new(path_str), &config)
+                    .map_err(|e| e.to_string())?;
+            let mut report = report;
+
+            // Optional churn weighting: the same complexity, weighted by how
+            // often each file actually changes.
+            if args.get("churn").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let root = std::path::Path::new(path_str);
+                let churn_config = forge_cognitive_complexity::ChurnConfig {
+                    since: args
+                        .get("churn_since")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    ..Default::default()
+                };
+                match forge_cognitive_complexity::churn::collect(root, &churn_config) {
+                    Ok(map) => {
+                        let scan_root = if root.is_file() {
+                            root.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
+                        } else {
+                            root.to_path_buf()
+                        };
+                        // Rank from the uncapped report so file scores do not
+                        // depend on the function-level cap.
+                        let uncapped = forge_cognitive_complexity::apply_limits(
+                            &report,
+                            &forge_cognitive_complexity::unbounded(&config),
+                        );
+                        let hotspots = forge_cognitive_complexity::rank_files(
+                            &uncapped, &map, &scan_root,
+                        );
+                        report.file_hotspots = Some(hotspots).filter(|v| !v.is_empty());
+                        report.churn = Some(map);
+                    }
+                    Err(err) => report
+                        .warnings
+                        .push(format!("churn weighting unavailable: {err}")),
+                }
+            }
+
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
         }
     );
 
@@ -2904,7 +3032,8 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                 "level": {"type": "string", "enum": ["summary", "full"], "description": "Granularity: 'summary' groups by module/file (default), 'full' includes individual functions and types"},
                 "prefix": {"type": "string", "description": "Filter to only include elements whose path starts with this prefix, e.g. 'src/core' or 'lib/auth'"},
                 "format": {"type": "string", "enum": ["markdown", "json", "mermaid", "csv"], "description": "Output format for 'analyze' command (default: markdown). 'mermaid' produces a dependency diagram, 'csv' is for spreadsheet import."},
-                "cross_language": {"type": "boolean", "description": "When true, also detect cross-language dependencies via FFI calls, IPC patterns, and shared protobuf/thrift definitions. Defaults to false."}
+                "cross_language": {"type": "boolean", "description": "When true, also detect cross-language dependencies via FFI calls, IPC patterns, and shared protobuf/thrift definitions. Defaults to false."},
+                "with_cognitive": {"type": "boolean", "description": "When true, also rank Rust functions by cognitive complexity (SonarSource), attribute the hot spots onto DSM elements, and fold them into the refactoring suggestions. A function-level signal complementing the element-level dependency view. Defaults to false."}
             },
             "required": ["command"]
         }),
@@ -2921,6 +3050,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
             };
             let prefix = args.get("prefix").and_then(|v| v.as_str()).map(|s| s.to_string());
             let cross_language = args.get("cross_language").and_then(|v| v.as_bool()).unwrap_or(false);
+            let with_cognitive = args.get("with_cognitive").and_then(|v| v.as_bool()).unwrap_or(false);
 
             let config = ExtractConfig {
                 level,
@@ -2942,7 +3072,6 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                     use forge_dsm_analyze::metrics::compute_metrics;
                     use forge_dsm_analyze::partition::partition;
                     use forge_dsm_analyze::report::{render, DsmReport, OutputFormat};
-                    use forge_dsm_analyze::suggest::generate_suggestions;
 
                     let extractor = MultiExtractor::new();
                     let edges = extractor.extract_all(&dir, &config).map_err(|e| e.to_string())?;
@@ -2961,7 +3090,12 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                     let clusters = cluster(&matrix, &cluster_config);
                     let metrics = compute_metrics(&matrix, &cycles, &clusters);
                     let part = partition(&matrix);
-                    let suggestions = generate_suggestions(&matrix, &cycles, &clusters, &metrics, &part, None);
+                    let cognitive = if with_cognitive {
+                        Some(forge_dsm_analyze::hotspots::collect(&dir, &matrix.labels))
+                    } else {
+                        None
+                    };
+                    let suggestions = forge_dsm_analyze::suggest::generate_suggestions_with_cognitive(&matrix, &cycles, &clusters, &metrics, &part, None, cognitive.as_ref());
 
                     let project_name = dir.file_name()
                         .map(|n| n.to_string_lossy().to_string())
@@ -2977,6 +3111,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                         partition: part,
                         suggestions,
                         directed: None,
+                        cognitive,
                     };
 
                     let fmt = match args.get("format").and_then(|v| v.as_str()).unwrap_or("markdown") {
@@ -4728,12 +4863,14 @@ fn main() -> anyhow::Result<()> {
             max_cc,
             max_nesting,
             max_params,
+            max_cognitive,
         } => {
             let config = forge_smell_detect::detector::DetectConfig {
                 max_function_lines: max_lines,
                 max_cc,
                 max_nesting,
                 max_params,
+                max_cognitive,
             };
             let mut reports = Vec::new();
             for path in &paths {
@@ -4765,6 +4902,90 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             println!("{}", forge_shared::emit_json(&reports, cli.pretty)?);
+        }
+
+        Commands::CognitiveComplexity {
+            paths,
+            max_cognitive,
+            top,
+            exclude_tests,
+            churn,
+            churn_since,
+        } => {
+            let config = forge_cognitive_complexity::CognitiveConfig {
+                max_cognitive,
+                // `0` is the documented escape hatch for "no limit".
+                top: if top == 0 { None } else { Some(top) },
+                exclude_tests,
+            };
+            let mut files: Vec<PathBuf> = Vec::new();
+            for path in &paths {
+                files.extend(forge_cognitive_complexity::rust_files(path)?);
+            }
+
+            // Score every function, then derive both views from that one scan:
+            // the capped function list, and the uncapped set behind the
+            // churn-weighted file ranking.
+            let scoring = forge_cognitive_complexity::unbounded(&config);
+            let mut reports = Vec::new();
+            for file in files {
+                let source = std::fs::read_to_string(&file)?;
+                let report = forge_cognitive_complexity::analyze_source(
+                    &file.display().to_string(),
+                    &source,
+                    &scoring,
+                );
+                reports.push(report);
+            }
+
+            let everything = forge_cognitive_complexity::merge_reports(reports, &scoring);
+            let mut report = forge_cognitive_complexity::apply_limits(&everything, &config);
+            let churn_map = if churn {
+                let root = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+                let churn_config = forge_cognitive_complexity::ChurnConfig {
+                    since: if churn_since.is_empty() {
+                        None
+                    } else {
+                        Some(churn_since.clone())
+                    },
+                    ..Default::default()
+                };
+                match forge_cognitive_complexity::churn::collect(&root, &churn_config) {
+                    Ok(map) => {
+                        let scan_root = if root.is_file() {
+                            root.parent().unwrap_or(Path::new(".")).to_path_buf()
+                        } else {
+                            root.clone()
+                        };
+                        // File totals come from `everything`, the uncapped scan,
+                        // so a file's score never depends on how deep the
+                        // function-level cap cut.
+                        let file_hotspots =
+                            forge_cognitive_complexity::rank_files(&everything, &map, &scan_root);
+                        report.file_hotspots = Some(file_hotspots).filter(|v| !v.is_empty());
+                        report.churn = Some(map);
+                        None
+                    }
+                    // Churn is unavailable, not zero. Say so and continue with
+                    // the complexity ranking rather than scoring everything 1.0.
+                    Err(err) => Some(format!("churn weighting unavailable: {err}")),
+                }
+            } else {
+                None
+            };
+            if let Some(warning) = churn_map {
+                report.warnings.push(warning);
+            }
+
+            if report.files_analyzed == 0 && report.files_scanned > 0 {
+                eprintln!(
+                    "warning: no Rust file could be parsed ({} scanned); see `failures` in the report",
+                    report.files_scanned
+                );
+            } else {
+                eprintln!("{}", forge_cognitive_complexity::summarize(&report));
+            }
+            println!("{}", forge_shared::emit_json(&report, cli.pretty)?);
         }
 
         Commands::DocCoverage { paths } => {

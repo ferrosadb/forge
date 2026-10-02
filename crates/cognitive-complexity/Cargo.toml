@@ -1,0 +1,23 @@
+[package]
+name = "forge-cognitive-complexity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+anyhow = { workspace = true }
+ignore = { workspace = true }
+# Cognitive complexity metric (SonarSource) for Rust, by Ross MacArthur.
+# MIT OR Apache-2.0, both already allowlisted in deny.toml.
+complexity = "0.2"
+# `complexity` is built on syn 1; Forge's own crates use syn 2, so both
+# versions coexist in the graph (cargo-deny bans duplicate versions as
+# "warn", not deny). The public API below exposes only strings and integers,
+# so no syn 1 type ever crosses the crate boundary.
+syn = { version = "1", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
