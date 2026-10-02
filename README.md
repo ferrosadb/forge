@@ -77,7 +77,8 @@ reads it.
 | Command | Description |
 |---------|-------------|
 | `frg coverage-gate --coverage <lcov.info> --source <dir> [--baseline N]` | Validate test coverage meets a baseline; enforces complexity-coverage coupling (high-CC code requires higher coverage) |
-| `frg smell-detect [paths...]` | Find code smells: long functions, high cyclomatic complexity, deep nesting |
+| `frg smell-detect [paths...]` | Find code smells: long functions, high cyclomatic complexity, deep nesting. `--max-cognitive N` controls the Rust-only cognitive-complexity finding |
+| `frg cognitive-complexity [paths...]` | Rank Rust functions by cognitive complexity (SonarSource) to find refactoring targets; `--max-cognitive N` sets the floor, `--top N` caps the list (default 100, `0` = no limit), `--exclude-tests` skips test functions |
 | `frg doc-coverage [paths...]` | Check public API documentation coverage; report undocumented exports |
 | `frg threat-scan [paths...]` | Scan for STRIDE attack patterns (spoofing, tampering, repudiation, info disclosure, DoS, elevation) |
 | `frg fail-loud-scan [paths...]` | Find swallowed errors, fake success returns, silent fallbacks, and mock-data leaks |
@@ -91,7 +92,7 @@ reads it.
 
 | Command | Description |
 |---------|-------------|
-| `frg dsm extract\|analyze [dir]` | Design Structure Matrix: `extract` returns raw dependency edges; `analyze` runs the full pipeline with cycle detection, cluster identification, metrics, and refactoring suggestions |
+| `frg dsm extract\|analyze [dir]` | Design Structure Matrix: `extract` returns raw dependency edges; `analyze` runs the full pipeline with cycle detection, cluster identification, metrics, and refactoring suggestions. `--with-cognitive` additionally ranks cognitive complexity hot spots and folds them into the suggestions |
 | `frg dsm dead-code [dir]` | Find unreachable declarations via BFS from entry points; `--min-confidence definite\|possible\|all`, `--include-tests`, `--exclude <glob>` (repeatable), skips generated files and `#[cfg(test)]` items |
 | `frg dep-tree [dir]` | Build per-module dependency map showing import fan-in and fan-out |
 | `frg api-diff` | Diff public API surface between two refs; detect breaking changes |
@@ -255,6 +256,7 @@ Tools are split into two tiers:
 | `excerpt` | `frg excerpt` |
 | `glob` | `frg glob` |
 | `smell_detect` | `frg smell-detect` |
+| `cognitive_complexity` | `frg cognitive-complexity` |
 | `format_fix` | `frg format-fix` |
 | `git_summary` | git status / log / diff (structured) |
 | `list` | list all available forge tools |

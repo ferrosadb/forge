@@ -4,6 +4,7 @@ pub mod dead_code;
 pub mod directed;
 pub mod enforce;
 pub mod extract;
+pub mod hotspots;
 pub mod matrix;
 pub mod metrics;
 pub mod partition;

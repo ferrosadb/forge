@@ -10,6 +10,7 @@ members = [
     "crates/log-monitor",
     "crates/coverage-gate",
     "crates/smell-detect",
+    "crates/cognitive-complexity",
     "crates/doc-coverage",
     "crates/project-detect",
     "crates/digest",
