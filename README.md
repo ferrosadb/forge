@@ -104,7 +104,7 @@ reads it.
 |---------|-------------|
 | `frg digest [paths...]` | Token-efficient structural summary: functions, types, imports — no bodies. Best first call on an unfamiliar file |
 | `frg excerpt <target> [--context N]` | Extract a single named symbol with surrounding context lines |
-| `frg lookup <symbol> [dir]` | Find symbol definitions across the project |
+| `frg lookup <symbol> [dir]` | Find symbol definitions across the project. Uses an installed language server when the tree is large enough to be worth indexing, otherwise a parallel scan that only parses files mentioning the symbol. `method` reports which path ran (`lsp`/`scan`/`lsp_fallback`) and `lsp_error` says why a detected server was not used. A warning on stderr names the server to install when one is missing |
 | `frg outline <file>` | Extract function signatures, type definitions, and module structure from a single file |
 | `frg glob <pattern> [--format brief\|json\|csv\|table]` | Find files matching a glob pattern; returns bounded per-file path, size, line count, modification time, and generated-file metadata |
 | `frg project-detect [dir]` | Auto-detect project type, languages, frameworks, and applicable forge tools |

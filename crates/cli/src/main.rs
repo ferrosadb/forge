@@ -1964,7 +1964,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
     register_tool!(
         server,
         "find_definition",
-        "Find the file and line where a function, module, class, struct, or type is defined across all source files in a project. Use this when you need to locate a symbol definition without knowing which file it lives in — for example, before reading or editing a function, or when navigating an unfamiliar codebase. Returns the file path, line number, and symbol kind for each match. Searches all recognized source files (Rust, Python, Elixir, Go, TypeScript, Java, C/C++, etc.) respecting .gitignore. Does not search inside function bodies or comments — only declarations.",
+        "Find the file and line where a function, module, class, struct, or type is defined across all source files in a project. Use this when you need to locate a symbol definition without knowing which file it lives in — for example, before reading or editing a function, or when navigating an unfamiliar codebase. Returns the file path, line number, and symbol kind for each match. Uses an installed language server when one matches the project (a `workspace/symbol` query answered from its index), and otherwise falls back to a fast parallel scan that only parses files actually mentioning the symbol. The `method` field reports which path was used — `lsp`, `scan`, or `lsp_fallback` — and `lsp_error` explains why a detected server was not used, so a slow result is never a mystery. A symbol that exists is always found: a language server that answers empty (typically still indexing) falls back to the scan rather than reporting a false negative. Searches all recognized source files (Rust, Python, Elixir, Go, TypeScript, Java, C/C++, etc.) respecting .gitignore. Does not search inside function bodies or comments — only declarations.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -5343,6 +5343,12 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Lookup { symbol, dir } => {
             let result = forge_digest::lookup::lookup_symbol(&symbol, &dir)?;
+            // Emitted on stderr so structured stdout stays clean: a slower-than-
+            // necessary lookup should be visible, not something the operator has
+            // to infer from timing.
+            if let Some(hint) = forge_digest::lookup::speedup_hint(&result, &dir) {
+                eprintln!("warning: {hint}");
+            }
             if cli.pretty {
                 println!("{}", forge_digest::lookup::format_lookup(&result));
             } else {

@@ -10,5 +10,9 @@ serde_json = { workspace = true }
 regex = { workspace = true }
 anyhow = { workspace = true }
 ignore = { workspace = true }
+memchr = "2"
 dirs = { workspace = true }
 forge-shared = { path = "../shared" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

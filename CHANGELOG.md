@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Symbol lookup is now fast, and uses installed language servers.**
+  `frg lookup` / `find_definition` previously parsed every source file just to
+  match a name, which took ~3.7 s on a 199-file tree and scaled to *minutes* on a
+  large repository — a 300 s timeout on a real monorepo. Two changes:
+
+  - A parallel walk that **only parses files containing the symbol text**. Most
+    files in a tree do not define any given symbol, so a byte search rejects them
+    before the expensive step. Measured 3.7 s to 0.9 s on the same tree.
+  - A minimal LSP client (`workspace/symbol` over stdio) that uses an installed
+    language server when the project is large enough to be worth indexing.
+    Detection covers rust-analyzer, clangd, gopls, pyright/basedpyright/pylsp,
+    typescript-language-server, elixir-ls, jdtls and sourcekit-lsp.
+
+  The language server is an accelerator, never a downgrade: it is used only when
+  it returns symbols for the requested name. A server that fails, or that answers
+  empty while still indexing (rust-analyzer answers in ~1 s with nothing before
+  its index is ready), falls through to the scan with the reason recorded rather
+  than reporting a false "no such symbol". Path selection is by measured
+  crossover — the scan costs ~2 ms per file, a cold server ~6.5 s of indexing
+  regardless of size — so small trees scan and large trees use the index.
+
+- **A warning when a lookup could be faster.** `frg lookup` writes one line to
+  stderr naming either the server that is installed but cannot run (with the
+  reason, typically a rustup shim for a component that was never installed) or
+  the server to install for this project's languages. Structured stdout stays
+  clean; the advice never contradicts the result.
+
+### Fixed
+
+- **Symbol lookup no longer times out on a large repository.** `frg lookup` /
+  `find_definition` parsed every source file to match a name, taking ~3.7 s on a
+  199-file tree and minutes on a monorepo. It now rejects files that do not
+  contain the symbol text before parsing, and walks in parallel.
+
+- **A detected language server is no longer assumed to work.** A rustup shim for
+  an uninstalled `rust-analyzer` passed an existence check and was reported as
+  available. Servers are now probed by execution, and one that cannot run is
+  disclosed with its own error message.
+
+- **A language server for the wrong language is no longer chosen.** Detection
+  fell back to any runnable server and picked clangd for a Rust project, which
+  answers confidently and emptily — a false negative worse than not using a
+  server. A server must now match the project's markers or file extensions.
+
+- **Tracking failures are no longer silent.** `frg run`'s best-effort
+  token-savings tracking now emits a single `frg: tracking disabled: <error>`
+  line on stderr on failure instead of dropping the error.
+
 - **`frg run` always ends with one status line on stderr.** Every `frg run`
   invocation now prints exactly one `frg: ok|FAIL exit=<code> ms=<duration>
   filter=<name> cmd="<cmd>"` line to stderr, so agents can tell "passed with
@@ -17,12 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `raw=<path>` when `--tee` saved raw output (replacing the old, separate
   `[raw output saved: ...]` line). Filtered stdout is unchanged. Opt out with
   `FRG_RUN_STATUS=0`.
-
-### Fixed
-
-- **Tracking failures are no longer silent.** `frg run`'s best-effort
-  token-savings tracking now emits a single `frg: tracking disabled: <error>`
-  line on stderr on failure instead of dropping the error.
 
 ## [0.18.0] - 2026-08-27
 
