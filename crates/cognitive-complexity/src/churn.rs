@@ -15,7 +15,7 @@
 //!
 //! let report = analyze_path("src".as_ref(), &CognitiveConfig::default())?;
 //! let map = churn::collect(".".as_ref(), &churn::ChurnConfig::default())?;
-//! let ranked = churn::rank_files(&report, &map, ".".as_ref());
+//! let ranked = churn::rank_files(&report, &map);
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
@@ -74,25 +74,37 @@ impl ChurnMap {
     }
 
     /// Normalise a filesystem path to the key used in `commits`.
+    ///
+    /// Handles the three ways a caller can hand us a path: absolute, relative to
+    /// the current directory, or already relative to the repository root. The
+    /// last case is what a scan rooted at the repo produces, and missing it makes
+    /// every lookup return zero churn for no visible reason.
     fn relative_key(&self, path: &str) -> String {
         let root = Path::new(&self.repo_root);
         let candidate = Path::new(path);
-        let absolute = if candidate.is_absolute() {
-            candidate.to_path_buf()
+
+        let mut tries: Vec<PathBuf> = Vec::new();
+        if candidate.is_absolute() {
+            tries.push(candidate.to_path_buf());
         } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(candidate))
-                .unwrap_or_else(|_| candidate.to_path_buf())
-        };
-        // Match the canonicalisation applied to `repo_root`, so `/var` and
-        // `/private/var` spellings of the same directory still line up.
-        let absolute = std::fs::canonicalize(&absolute).unwrap_or(absolute);
-        let relative = absolute.strip_prefix(root).unwrap_or(&absolute);
-        relative
-            .components()
-            .filter_map(|c| c.as_os_str().to_str())
-            .collect::<Vec<_>>()
-            .join("/")
+            if let Ok(cwd) = std::env::current_dir() {
+                tries.push(cwd.join(candidate));
+            }
+            tries.push(root.join(candidate));
+        }
+
+        for absolute in tries {
+            let absolute = std::fs::canonicalize(&absolute).unwrap_or(absolute);
+            if let Ok(relative) = absolute.strip_prefix(root) {
+                return relative
+                    .components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .collect::<Vec<_>>()
+                    .join("/");
+            }
+        }
+
+        path.to_string()
     }
 }
 
@@ -250,7 +262,12 @@ pub fn churn_factor(commits: usize) -> f64 {
 ///
 /// Files absent from `map` are genuinely unchanged in the window; their factor
 /// stays `1.0`. Only files with at least one scored function are considered.
-pub fn rank_files(report: &CognitiveReport, map: &ChurnMap, root: &Path) -> Vec<FileHotspot> {
+///
+/// The report's own `file` strings are used as-is; `ChurnMap::commits_for`
+/// resolves them. Do NOT prefix them with the scan root here — a scan rooted deep
+/// in a tree records paths relative to *that* root, and prefixing produced keys
+/// that matched nothing, silently scoring every file as unchanged.
+pub fn rank_files(report: &CognitiveReport, map: &ChurnMap) -> Vec<FileHotspot> {
     let mut per_file: BTreeMap<&str, (u32, u32, usize)> = BTreeMap::new();
     for function in &report.functions {
         let entry = per_file.entry(function.file.as_str()).or_insert((0, 0, 0));
@@ -262,7 +279,7 @@ pub fn rank_files(report: &CognitiveReport, map: &ChurnMap, root: &Path) -> Vec<
     let mut hotspots: Vec<FileHotspot> = per_file
         .into_iter()
         .map(|(file, (cognitive_total, max_cognitive, functions))| {
-            let commits = map.commits_for(&absolute(file, root));
+            let commits = map.commits_for(file);
             let factor = churn_factor(commits);
             FileHotspot {
                 file: file.to_string(),
@@ -284,17 +301,6 @@ pub fn rank_files(report: &CognitiveReport, map: &ChurnMap, root: &Path) -> Vec<
             .then_with(|| a.file.cmp(&b.file))
     });
     hotspots
-}
-
-/// Make a scan-relative path absolute against the scan root so it can be
-/// matched against repository-relative churn keys.
-fn absolute(file: &str, root: &Path) -> String {
-    let path = PathBuf::from(file);
-    if path.is_absolute() {
-        file.to_string()
-    } else {
-        root.join(path).to_string_lossy().into_owned()
-    }
 }
 
 #[cfg(test)]
@@ -449,7 +455,7 @@ mod tests {
             function("cold.rs", "cold_fn", 60),
         ]);
         let map = collect(dir.path(), &ChurnConfig::default()).unwrap();
-        let ranked = rank_files(&report, &map, dir.path());
+        let ranked = rank_files(&report, &map);
 
         assert_eq!(ranked.len(), 2);
         assert_eq!(
@@ -488,8 +494,83 @@ mod tests {
             function("churny.rs", "tiny_fn", 2),
         ]);
         let map = collect(dir.path(), &ChurnConfig::default()).unwrap();
-        let ranked = rank_files(&report, &map, dir.path());
+        let ranked = rank_files(&report, &map);
         assert_eq!(ranked[0].file, "gnarly.rs", "complexity dominates");
+    }
+
+    /// A scan rooted at the repository records paths already relative to that
+    /// root. Those must resolve; prefixing them with the scan root silently
+    /// matched nothing and scored every file as unchanged.
+    #[test]
+    fn repo_relative_paths_resolve_without_a_root_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::create_dir_all(dir.path().join("crates/core/src")).unwrap();
+        write_and_commit(
+            dir.path(),
+            "crates/core/src/lib.rs",
+            "pub fn a() {}\n",
+            "one",
+        );
+        write_and_commit(
+            dir.path(),
+            "crates/core/src/lib.rs",
+            "pub fn a() {}\n// x\n",
+            "two",
+        );
+
+        let map = collect(dir.path(), &ChurnConfig::default()).unwrap();
+        // Exactly how a report records it when the scan root is the repo.
+        let report = report_of(vec![function("crates/core/src/lib.rs", "a", 50)]);
+        let ranked = rank_files(&report, &map);
+
+        assert_eq!(
+            ranked[0].commits, 2,
+            "a repo-relative path must find its churn, not silently read zero"
+        );
+        assert!(
+            ranked[0].churn_factor > 1.0,
+            "factor must reflect the churn"
+        );
+        assert!(
+            ranked[0].hotspot_score > 50.0,
+            "score must be amplified: {}",
+            ranked[0].hotspot_score
+        );
+    }
+
+    /// The failure this guards against: churn present in the map but never
+    /// matched, so every score is silently the raw complexity total.
+    #[test]
+    fn churn_actually_changes_the_ranking() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        for i in 0..10 {
+            write_and_commit(
+                dir.path(),
+                "hot.rs",
+                &format!("pub fn a() {{}}// {i}\n"),
+                &format!("c{i}"),
+            );
+        }
+        write_and_commit(dir.path(), "cold.rs", "pub fn b() {}\n", "once");
+
+        let map = collect(dir.path(), &ChurnConfig::default()).unwrap();
+        let report = report_of(vec![
+            function("cold.rs", "b", 100),
+            function("hot.rs", "a", 100),
+        ]);
+        let ranked = rank_files(&report, &map);
+
+        assert!(
+            ranked.iter().any(|h| h.commits > 0),
+            "at least one file must show its churn: {ranked:?}"
+        );
+        assert_eq!(ranked[0].file, "hot.rs", "the churning file must win");
+        assert_ne!(
+            ranked[0].hotspot_score, ranked[1].hotspot_score,
+            "identical complexity must be separated by churn"
+        );
     }
 
     #[test]
@@ -499,7 +580,7 @@ mod tests {
             repo_root: "/repo".to_string(),
             ..Default::default()
         };
-        let ranked = rank_files(&report, &map, Path::new("/repo"));
+        let ranked = rank_files(&report, &map);
         assert_eq!(ranked[0].commits, 0);
         assert_eq!(ranked[0].churn_factor, 1.0);
         assert_eq!(ranked[0].hotspot_score, 50.0);

@@ -2251,20 +2251,14 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                 };
                 match forge_cognitive_complexity::churn::collect(root, &churn_config) {
                     Ok(map) => {
-                        let scan_root = if root.is_file() {
-                            root.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
-                        } else {
-                            root.to_path_buf()
-                        };
                         // Rank from the uncapped report so file scores do not
                         // depend on the function-level cap.
                         let uncapped = forge_cognitive_complexity::apply_limits(
                             &report,
                             &forge_cognitive_complexity::unbounded(&config),
                         );
-                        let hotspots = forge_cognitive_complexity::rank_files(
-                            &uncapped, &map, &scan_root,
-                        );
+                        let hotspots =
+                            forge_cognitive_complexity::rank_files(&uncapped, &map);
                         report.file_hotspots = Some(hotspots).filter(|v| !v.is_empty());
                         report.churn = Some(map);
                     }
@@ -4952,16 +4946,11 @@ fn main() -> anyhow::Result<()> {
                 };
                 match forge_cognitive_complexity::churn::collect(&root, &churn_config) {
                     Ok(map) => {
-                        let scan_root = if root.is_file() {
-                            root.parent().unwrap_or(Path::new(".")).to_path_buf()
-                        } else {
-                            root.clone()
-                        };
                         // File totals come from `everything`, the uncapped scan,
                         // so a file's score never depends on how deep the
                         // function-level cap cut.
                         let file_hotspots =
-                            forge_cognitive_complexity::rank_files(&everything, &map, &scan_root);
+                            forge_cognitive_complexity::rank_files(&everything, &map);
                         report.file_hotspots = Some(file_hotspots).filter(|v| !v.is_empty());
                         report.churn = Some(map);
                         None

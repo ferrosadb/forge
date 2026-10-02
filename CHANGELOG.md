@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loses only the amplification — so churn re-orders equally complex files rather
   than swamping complexity. File totals are computed from the uncapped scan, so
   a file's score never depends on the function-level `--top` cut.
+
+  `ChurnMap::commits_for` resolves the three shapes a caller can supply —
+  absolute, cwd-relative, or already relative to the repository root (what a scan
+  rooted at the repo produces). All three are covered by tests: prefixing a
+  repo-relative path instead of resolving it produced keys that matched nothing
+  and silently scored every file as unchanged, which reads as a legitimate
+  result rather than a failure.
 - **Cognitive complexity in `frg smell-detect`.** Rust files gain an AST-based
   `HighCognitiveComplexity` finding alongside the existing regex cyclomatic and
   nesting checks; `--max-cognitive` controls its threshold.
