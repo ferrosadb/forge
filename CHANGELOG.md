@@ -22,7 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   land at 10/20/40 (roughly 7%/3%/1% of functions) and the result is a target
   list rather than a finding dump. The report also publishes those percentiles
   so a caller can see whether their codebase is denser than the calibration set.
-- **`cognitive_complexity` MCP tool**, exposing the same ranking to agents.
+- **`cognitive_complexity` MCP tool**, exposing the same ranking to agents
+  (`churn` / `churn_since` enable the churn weighting).
+- **Churn-weighted file targets (`--churn`).** Complexity says what is hard to
+  read; churn says what you keep touching, and a file that is both is where
+  refactoring actually pays. Adds a `file_hotspots` ranking across files with
+  `hotspot_score = cognitive_total x (1 + ln(1 + commits))`, read from real git
+  history (`--churn-since` sets the window, default 12 months). The factor is
+  1.0 for unchanged files — a complex file nobody edits keeps its complexity and
+  loses only the amplification — so churn re-orders equally complex files rather
+  than swamping complexity. File totals are computed from the uncapped scan, so
+  a file's score never depends on the function-level `--top` cut.
 - **Cognitive complexity in `frg smell-detect`.** Rust files gain an AST-based
   `HighCognitiveComplexity` finding alongside the existing regex cyclomatic and
   nesting checks; `--max-cognitive` controls its threshold.

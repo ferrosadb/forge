@@ -178,6 +178,13 @@ pub struct CognitiveReport {
     pub bands: BandCounts,
     /// Score distribution across everything scored, for threshold calibration.
     pub percentiles: Percentiles,
+    /// File-level targets weighted by git churn. Present only with a churn
+    /// weighting request; empty when no file had a scorable function.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_hotspots: Option<Vec<crate::churn::FileHotspot>>,
+    /// How the churn history was read, when churn weighting was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub churn: Option<crate::churn::ChurnMap>,
     /// Ranked refactoring targets: highest cognitive complexity first.
     pub functions: Vec<FunctionComplexity>,
     pub failures: Vec<FileFailure>,
@@ -244,6 +251,8 @@ mod tests {
                 severe: 1,
             },
             percentiles: Percentiles::default(),
+            file_hotspots: None,
+            churn: None,
             functions: Vec::new(),
             failures: Vec::new(),
             warnings: Vec::new(),

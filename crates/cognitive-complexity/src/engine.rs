@@ -85,6 +85,8 @@ pub fn analyze_path(path: &Path, config: &CognitiveConfig) -> Result<CognitiveRe
         max_cognitive: 0,
         bands: BandCounts::default(),
         percentiles: Percentiles::default(),
+        file_hotspots: None,
+        churn: None,
         functions: Vec::new(),
         failures: Vec::new(),
         warnings: Vec::new(),
@@ -134,6 +136,8 @@ pub fn analyze_source(file: &str, source: &str, config: &CognitiveConfig) -> Cog
         max_cognitive: 0,
         bands: BandCounts::default(),
         percentiles: Percentiles::default(),
+        file_hotspots: None,
+        churn: None,
         functions: Vec::new(),
         failures: Vec::new(),
         warnings: Vec::new(),
@@ -513,6 +517,8 @@ pub fn merge_reports(reports: Vec<CognitiveReport>, config: &CognitiveConfig) ->
         max_cognitive: 0,
         bands: BandCounts::default(),
         percentiles: Percentiles::default(),
+        file_hotspots: None,
+        churn: None,
         functions: Vec::new(),
         failures: Vec::new(),
         warnings: Vec::new(),
@@ -543,6 +549,20 @@ pub fn unbounded(config: &CognitiveConfig) -> CognitiveConfig {
         top: None,
         exclude_tests: config.exclude_tests,
     }
+}
+
+/// Derive a narrowed view of an unbounded report without re-reading or
+/// re-scoring anything.
+///
+/// Totals, bands, and percentiles are recomputed over the full set, so a caller
+/// that needs both views (e.g. an uncapped file ranking alongside a capped
+/// function list) produces one scan and derives the other. `base` is expected
+/// to carry the full function set — merging already-capped reports would lose
+/// functions and understate these totals.
+pub fn apply_limits(base: &CognitiveReport, config: &CognitiveConfig) -> CognitiveReport {
+    let mut narrowed = base.clone();
+    finish_report(&mut narrowed, base.functions.clone(), config);
+    narrowed
 }
 
 /// Resolve a path argument into files the way `analyze_path` does, exposed for

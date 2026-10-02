@@ -78,7 +78,7 @@ reads it.
 |---------|-------------|
 | `frg coverage-gate --coverage <lcov.info> --source <dir> [--baseline N]` | Validate test coverage meets a baseline; enforces complexity-coverage coupling (high-CC code requires higher coverage) |
 | `frg smell-detect [paths...]` | Find code smells: long functions, high cyclomatic complexity, deep nesting. `--max-cognitive N` controls the Rust-only cognitive-complexity finding |
-| `frg cognitive-complexity [paths...]` | Rank Rust functions by cognitive complexity (SonarSource) to find refactoring targets; `--max-cognitive N` sets the floor, `--top N` caps the list (default 100, `0` = no limit), `--exclude-tests` skips test functions |
+| `frg cognitive-complexity [paths...]` | Rank Rust functions by cognitive complexity (SonarSource) to find refactoring targets; `--max-cognitive N` sets the floor, `--top N` caps the list (default 100, `0` = no limit), `--exclude-tests` skips test functions. `--churn` adds a file-level ranking weighted by git churn (`--churn-since` sets the window), scoring files that are both complex and frequently changed highest |
 | `frg doc-coverage [paths...]` | Check public API documentation coverage; report undocumented exports |
 | `frg threat-scan [paths...]` | Scan for STRIDE attack patterns (spoofing, tampering, repudiation, info disclosure, DoS, elevation) |
 | `frg fail-loud-scan [paths...]` | Find swallowed errors, fake success returns, silent fallbacks, and mock-data leaks |

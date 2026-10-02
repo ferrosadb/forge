@@ -22,12 +22,18 @@
 //! }
 //! # Ok::<(), anyhow::Error>(())
 //! ```
+//!
+//! [`churn`] adds the other half of the picture: complexity weighted by how
+//! often a file actually changes.
 
+pub mod churn;
 mod engine;
 mod report;
 
+pub use churn::{churn_factor, rank_files, ChurnConfig, ChurnMap, FileHotspot};
+
 pub use engine::{
-    analyze_dir, analyze_path, analyze_source, merge_reports, rust_files, unbounded,
+    analyze_dir, analyze_path, analyze_source, apply_limits, merge_reports, rust_files, unbounded,
     CognitiveConfig, DEFAULT_TOP,
 };
 pub use report::summarize;
