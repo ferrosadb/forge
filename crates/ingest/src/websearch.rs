@@ -698,12 +698,54 @@ fn read_bounded(response: ureq::http::Response<ureq::Body>, label: &str) -> Resu
 // Probe
 // ---------------------------------------------------------------------------
 
-/// Configured SearXNG base URL, if any. Explicit configuration always wins.
+/// Configuration key forge reads from its own config files.
+const WEB_SEARCH_CONFIG_KEY: &str = "web_search_url";
+
+/// Read one string key from a forge config file, if present and non-blank.
+fn read_config_key(path: &std::path::Path) -> Option<String> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let doc: toml::Value = toml::from_str(&body).ok()?;
+    let value = doc.get(WEB_SEARCH_CONFIG_KEY)?.as_str()?.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Resolve the configured search-instance URL from **forge's own** configuration.
+///
+/// Resolution order, highest priority first:
+///
+/// 1. `FORGE_WEB_SEARCH_URL`, then `SEARXNG_URL`
+/// 2. `.forge/config.toml`, walking up from the working directory
+/// 3. `~/.config/forge.toml`
+///
+/// Forge reads its own configuration. It deliberately does not read another
+/// tool's config file: the search backend is a property of this installation, and
+/// depending on where some other program keeps its settings would make forge stop
+/// working when that program is absent, renamed, or reconfigured. A tool that spawns
+/// forge is free to set the environment variable, which is layer 1.
 fn configured_searxng() -> Option<String> {
-    std::env::var("FORGE_WEB_SEARCH_URL")
-        .or_else(|_| std::env::var("SEARXNG_URL"))
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    for key in ["FORGE_WEB_SEARCH_URL", "SEARXNG_URL"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        for dir in cwd.ancestors() {
+            if let Some(value) = read_config_key(&dir.join(".forge").join("config.toml")) {
+                return Some(value);
+            }
+        }
+    }
+
+    let home = dirs::home_dir()?;
+    read_config_key(&home.join(".config").join("forge.toml"))
 }
 
 /// Google Programmable Search credentials, if both are present.
@@ -874,9 +916,13 @@ fn state_writable() -> bool {
     )
 }
 
-/// Path to the state file.
+/// Path to the state file, beside forge's other per-user state.
+///
+/// `dirs::config_dir()/forge/websearch.toml`, matching where forge already keeps
+/// `filters.toml` and `aliases.toml`, so a user looking for "where does forge put
+/// its settings" finds them together.
 fn state_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".forge").join("websearch.toml"))
+    dirs::config_dir().map(|dir| dir.join("forge").join("websearch.toml"))
 }
 
 /// Load persisted state. A missing file is the default, not an error.
@@ -1439,6 +1485,67 @@ mod tests {
             start.elapsed() < Duration::from_millis(MIN_REQUEST_INTERVAL_MS),
             "different backends must not wait on each other"
         );
+    }
+
+    #[test]
+    fn config_file_supplies_a_search_url_but_a_blank_one_is_ignored() {
+        // Forge reads its own config file. A blank value means "not configured",
+        // not "configured as empty", which would otherwise be handed to the URL
+        // parser and rejected far from the cause.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forge.toml");
+        std::fs::write(
+            &path,
+            "web_search_url = \"http://127.0.0.1:18888/search\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_config_key(&path).as_deref(),
+            Some("http://127.0.0.1:18888/search")
+        );
+
+        std::fs::write(&path, "web_search_url = \"   \"\n").unwrap();
+        assert!(read_config_key(&path).is_none(), "blank must mean unset");
+
+        std::fs::write(&path, "something_else = 1\n").unwrap();
+        assert!(read_config_key(&path).is_none(), "absent key must be None");
+
+        assert!(read_config_key(&dir.path().join("nope.toml")).is_none());
+    }
+
+    #[test]
+    fn forge_does_not_read_another_tools_config() {
+        // The guard on a real mistake: an earlier version of the health check read
+        // the Hermes environment file to learn this URL, which made a standalone
+        // forge install depend on Hermes' configuration.
+        //
+        // Only the production half of the file is inspected. The rest of this file
+        // necessarily names the forbidden paths in order to assert on them, so
+        // checking the whole source would make this test match itself.
+        let source = include_str!("websearch.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("file has a production section");
+        for forbidden in ["hermes", "Hermes", "config.yaml", "ferrosa-memory.toml"] {
+            assert!(
+                !production.contains(forbidden),
+                "web search must not read another tool's config: found {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_state_lives_beside_forges_other_state() {
+        // Not under $HOME/.forge: forge already keeps filters.toml and aliases.toml
+        // under the platform config dir, and one tool's settings belong in one place.
+        if let Some(path) = state_path() {
+            assert!(
+                path.ends_with("forge/websearch.toml"),
+                "got {}",
+                path.display()
+            );
+        }
     }
 
     #[test]

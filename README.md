@@ -134,12 +134,35 @@ Use `ingest-url` when the page should become durable ferrosa-memory knowledge;
 use `fetch-url` when an agent only needs to read the page in the current turn.
 
 Search needs no configuration. `web-search` probes the backends it knows how to
-speak to and uses whichever answers: the built-in keyless backend, and any
-operator-owned instance named by `FORGE_WEB_SEARCH_URL` or `SEARXNG_URL`. An
-operator-owned instance is an accelerator, never a dependency — once it fails a
-probe it is fast-pathed around for a short window and retried afterwards, so a
-stopped instance costs a degraded fallback rather than a failed search. Run
+speak to and uses whichever answers: the built-in keyless backends, and any
+operator-owned instance named in Forge's own configuration. An operator-owned
+instance is an accelerator, never a dependency — once it fails a probe it is
+fast-pathed around for a short window and retried afterwards, so a stopped
+instance costs a degraded fallback rather than a failed search. Run
 `web-search-status` to see the current verdict per backend.
+
+Forge resolves its own configuration, in this order:
+
+| Layer | Location |
+|---|---|
+| 1 | `FORGE_WEB_SEARCH_URL`, then `SEARXNG_URL` |
+| 2 | `.forge/config.toml`, walking up from the working directory |
+| 3 | `~/.config/forge.toml` |
+
+```toml
+# ~/.config/forge.toml   (beside ferrosa-memory.toml, which Forge also reads)
+web_search_url = "http://127.0.0.1:18888/search"
+```
+
+Forge does not read another tool's configuration file. The search backend is a
+property of this installation, so a standalone install must work without any
+other program present; a tool that spawns Forge sets the environment variable
+instead, which is layer 1.
+
+Point the URL at the instance's search endpoint and let the instance choose its
+engines. Pinning engines in the URL (`.../search?engines=a,b`) overrides the
+instance's own per-engine failover, so a pinned engine that is unavailable takes
+the whole search down even when the instance could have answered from another.
 
 Search results are treated as hostile web content: Forge strips active/hidden
 markup, removes control characters, decodes entities, blocks prompt-injection

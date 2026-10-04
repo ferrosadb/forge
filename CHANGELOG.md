@@ -39,6 +39,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured. Prompt-injection protection on returned results is unchanged and is
   now documented as the guarantee it is: a hit whose text matches an injection
   pattern is dropped, never partially returned.
+- **Forge reads its own configuration for the search backend.** The search URL is
+  resolved from, in order: `FORGE_WEB_SEARCH_URL`/`SEARXNG_URL`, then
+  `.forge/config.toml` walking up from the working directory, then
+  `~/.config/forge.toml` — the same precedence Forge already uses for the task
+  store. It deliberately does not read another tool's configuration file: the
+  search backend belongs to this installation, so a standalone install must work
+  with no other program present. Per-user search state moved from `~/.forge/` to
+  `dirs::config_dir()/forge/websearch.toml`, beside `filters.toml` and
+  `aliases.toml`, so one tool's settings live in one place.
+- **Do not pin engines in the configured URL.** A `engines=` list overrides the
+  SearXNG instance's own per-engine failover, so pinning an engine that is
+  unavailable takes the whole search down while the instance could still have
+  answered from another. The documentation now says so explicitly.
 
 - **Cognitive complexity analysis (`frg cognitive-complexity`).** Ranks Rust
   functions by [SonarSource cognitive complexity][cog], computed from the AST via
