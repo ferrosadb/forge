@@ -121,7 +121,10 @@ These commands ingest structured knowledge into ferrosa-memory via the `agent_me
 | `frg ingest-descriptions [dir]` | LLM-backed one-line descriptions for public entities; supports a configured provider and validates ≤60 words while rejecting prompt-leak strings |
 | `frg ingest-url <url>` | Fetch a web page and ingest its structure and concepts as entities |
 | `frg fetch-url <url>` | Fetch a web page through Forge's trusted HTTP path and return compact read-only text, sections, and links without persistence |
-| `frg web-search <query>` | Search for candidate URLs through an explicitly configured trusted SearXNG backend (`FORGE_WEB_SEARCH_URL` or `SEARXNG_URL`) |
+| `frg web-search <query>` | Search the web. Works with no configuration: probes the built-in backend and any configured instance, and uses whichever answers |
+| `frg web-search-status` | Probe every search backend and report which is usable now, with the command that fixes one that is not |
+| `frg web-search-enable <backend>` | Enable `brave` or `searxng` after a probe has confirmed it answers |
+| `frg web-search-disable <backend>` | Disable a backend |
 | `frg ingest-paper <source>` | Ingest an academic paper (see [PDF ingestion](#pdf-ingestion)) |
 | `frg ingest-corpus <path>` | Ingest corpus markdown distillation files; creates L1/L2/L3 entities with deterministic UUID5 IDs |
 
@@ -129,13 +132,22 @@ These commands ingest structured knowledge into ferrosa-memory via the `agent_me
 5 MB response cap, prompt-injection sanitization, and relative-link resolution.
 Use `ingest-url` when the page should become durable ferrosa-memory knowledge;
 use `fetch-url` when an agent only needs to read the page in the current turn.
-Forge ships with no default search provider: `web-search` fails loud until a
-user-owned/trusted SearXNG endpoint is configured. SearXNG result titles,
-snippets, engines, and URLs are treated as hostile web content: Forge strips
-active/hidden markup, removes control characters, decodes entities, blocks
-prompt-injection patterns, strips sensitive URL query parameters, caps returned
-text, and returns only a deterministic extractive `summary` generated from the
-scrubbed text. No LLM summarizer is invoked in the search path.
+
+Search needs no configuration. `web-search` probes the backends it knows how to
+speak to and uses whichever answers: the built-in keyless backend, and any
+operator-owned instance named by `FORGE_WEB_SEARCH_URL` or `SEARXNG_URL`. An
+operator-owned instance is an accelerator, never a dependency — once it fails a
+probe it is fast-pathed around for a short window and retried afterwards, so a
+stopped instance costs a degraded fallback rather than a failed search. Run
+`web-search-status` to see the current verdict per backend.
+
+Search results are treated as hostile web content: Forge strips active/hidden
+markup, removes control characters, decodes entities, blocks prompt-injection
+patterns, strips sensitive URL query parameters, caps returned text, and returns
+only a deterministic extractive `summary` generated from the scrubbed text. A hit
+whose text matches a prompt-injection pattern is dropped rather than returned, so
+an agent never receives search text written to steer it. No LLM summarizer is
+invoked in the search path.
 
 ### Task and workflow management
 
@@ -288,6 +300,7 @@ Tools are split into two tiers:
 | `ingest_url` | `frg ingest-url` |
 | `fetch_url` | `frg fetch-url` |
 | `web_search` | `frg web-search` |
+| `web_search_status` | `frg web-search-status` |
 | `ingest_paper` | `frg ingest-paper` |
 | `ingest_corpus` | `frg ingest-corpus` |
 | `task_create` | `frg task create` |

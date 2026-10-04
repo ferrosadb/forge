@@ -825,6 +825,7 @@ version = "0.18.2"
 dependencies = [
  "anyhow",
  "chrono",
+ "dirs",
  "forge-fmem-client",
  "forge-secret-scan",
  "forge-shared",

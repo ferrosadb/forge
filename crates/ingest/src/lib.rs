@@ -36,3 +36,4 @@ pub mod skill_ingest;
 pub mod smart_paper_loader;
 pub mod source_buffer;
 pub mod url;
+pub mod websearch;

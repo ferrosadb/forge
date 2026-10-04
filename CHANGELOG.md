@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Built-in web search (`frg web-search`).** Search no longer requires a
+  pre-configured provider. Forge probes the backends it knows how to speak to and
+  uses whichever answers: a built-in keyless backend, and any operator-owned
+  instance named by `FORGE_WEB_SEARCH_URL` or `SEARXNG_URL`. An operator-owned
+  instance is an accelerator rather than a dependency — after it fails a probe it is
+  fast-pathed around for a short window and retried afterwards, so a stopped or
+  mis-pinned instance degrades to the built-in backend instead of failing the
+  search. The first attempt at an operator-owned instance is bounded to a few
+  seconds, not a full query timeout, so discovering that it is down is cheap.
+  Health verdicts are cached in-process for a long-lived MCP server and mirrored to
+  disk for short-lived CLI runs, and are always overridden by an explicit probe.
+- **`frg web-search-status` / `web_search_status` MCP tool.** Probes every backend
+  and reports per-backend state (`ready` / `unavailable` / `not_configured`), what
+  was probed, and the exact command that fixes a backend that is not ready. The
+  `web_search` failure message now names every attempt and points at the status
+  command instead of returning a bare transport error.
+- **`frg web-search-enable` / `frg web-search-disable`.** Persist which backends
+  are enabled. Enabling refuses unless the backend just answered a probe, so it is
+  not possible to enable a backend that is silently dead. State writes are gated by
+  `FORGE_WEB_SEARCH_STATUS` so the test suite and pre-push hooks never rewrite a
+  developer's home directory; the only effect of the gate is that the decision is
+  not persisted.
+
+### Changed
+
+- **`web_search` needs no configuration.** Its description no longer claims Forge
+  ships with no default provider, and the tool no longer fails loud when nothing is
+  configured. Prompt-injection protection on returned results is unchanged and is
+  now documented as the guarantee it is: a hit whose text matches an injection
+  pattern is dropped, never partially returned.
+
 - **Cognitive complexity analysis (`frg cognitive-complexity`).** Ranks Rust
   functions by [SonarSource cognitive complexity][cog], computed from the AST via
   the `complexity` crate. Cyclomatic complexity counts branches; cognitive

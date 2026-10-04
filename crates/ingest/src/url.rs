@@ -841,7 +841,12 @@ struct SearxngHit {
     engine: Option<String>,
 }
 
-fn searxng_endpoint(base: &str) -> Result<Url> {
+/// Resolve a configured backend URL to a SearXNG `/search` endpoint.
+///
+/// Accepts `http`/`https` only, and appends the `search` path when the operator
+/// supplied a bare host. An operator's existing query parameters are preserved,
+/// so an engine pin in the URL keeps working.
+pub(crate) fn searxng_endpoint(base: &str) -> Result<Url> {
     let mut url = Url::parse(base).context("invalid trusted search backend URL")?;
     match url.scheme() {
         "http" | "https" => {}
@@ -855,7 +860,9 @@ fn searxng_endpoint(base: &str) -> Result<Url> {
     Ok(url)
 }
 
-fn normalize_search_url(raw: &str) -> Option<String> {
+/// Strip sensitive query parameters from a result URL. Reused by the built-in
+/// search backends so every returned URL is normalized in one place.
+pub(crate) fn normalize_search_url(raw: &str) -> Option<String> {
     let url = Url::parse(raw).ok()?;
     match url.scheme() {
         "http" | "https" => Some(strip_sensitive_params(url.as_ref())),
@@ -863,7 +870,13 @@ fn normalize_search_url(raw: &str) -> Option<String> {
     }
 }
 
-fn scrub_search_text(input: Option<&str>, max_chars: usize) -> Result<String> {
+/// Scrub untrusted search-result text before it reaches an agent.
+///
+/// Strips active markup, decodes entities, collapses whitespace, rejects text
+/// matching prompt-injection patterns, runs the shared web-content sanitizer, and
+/// bounds the result. Public because the built-in search backends reuse it so
+/// there is exactly one scrubber on this path.
+pub fn scrub_search_text(input: Option<&str>, max_chars: usize) -> Result<String> {
     let input = input.unwrap_or_default();
     let mut without_active = input.to_string();
     for pattern in [
@@ -921,7 +934,7 @@ fn contains_strict_prompt_injection(text: &str) -> Result<bool> {
 /// later adds model-backed search summarization, keep this function as the pre-LLM
 /// scrubber and run the model worker out-of-process with no network/filesystem
 /// privileges.
-fn summarize_search_result(title: &str, description: &str) -> String {
+pub(crate) fn summarize_search_result(title: &str, description: &str) -> String {
     let candidate = if description.trim().is_empty() {
         title
     } else {

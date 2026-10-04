@@ -462,13 +462,28 @@ enum Commands {
         url: String,
     },
 
-    /// Search via an explicitly configured trusted backend (SearXNG)
+    /// Search the web (built-in, no configuration required)
     WebSearch {
         /// Search query
         query: String,
         /// Maximum number of results to return
         #[arg(long, default_value_t = 5)]
         limit: usize,
+    },
+
+    /// Probe the search backends and report what is usable right now
+    WebSearchStatus,
+
+    /// Enable a search backend after a probe has confirmed it answers
+    WebSearchEnable {
+        /// Backend to enable: brave or searxng
+        backend: String,
+    },
+
+    /// Disable a search backend
+    WebSearchDisable {
+        /// Backend to disable: brave or searxng
+        backend: String,
     },
 
     /// Ingest an academic paper into a knowledge graph
@@ -3234,9 +3249,9 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
         }
     );
 
-    // web_search — URL discovery through an explicitly configured trusted backend
+    // web_search — URL discovery. Built in; no configuration required.
     register_tool!(server, "web_search",
-        "Search for URLs using a trusted user-configured SearXNG backend. Fails loud unless FORGE_WEB_SEARCH_URL or SEARXNG_URL is configured; Forge ships with no default third-party search provider.",
+        "Search the web for URLs. Works with no configuration: Forge probes its built-in backend and any operator-configured instance, uses whichever answers, and fast-paths around a backend that has failed recently so a stopped instance never breaks a search. Results are stripped of active markup and prompt-injection text before they are returned; a hit whose text looks like an instruction to an agent is dropped rather than returned. If every backend is down the error names each attempt and the command that fixes it.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3248,8 +3263,22 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
         |args| {
             let query = args.get("query").and_then(|v| v.as_str()).ok_or("query is required")?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-            let result = forge_ingest::url::trusted_web_search(query, limit).map_err(|e| e.to_string())?;
+            let result = forge_ingest::websearch::web_search(query, limit).map_err(|e| e.to_string())?;
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+    );
+
+    // web_search_status — probe every backend and report what is usable now.
+    register_tool!(server, "web_search_status",
+        "Report which search backends are usable right now, and the exact command to fix a backend that is not. Use this after a web_search failure, or to check whether an operator-configured instance is reachable, before assuming search is broken.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+        |_args| {
+            let status = forge_ingest::websearch::web_search_status();
+            serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
         }
     );
 
@@ -5850,8 +5879,22 @@ fn main() -> anyhow::Result<()> {
             println!("{}", forge_shared::emit_json(&result, cli.pretty)?);
         }
         Commands::WebSearch { query, limit } => {
-            let result = forge_ingest::url::trusted_web_search(&query, limit)?;
+            let result = forge_ingest::websearch::web_search(&query, limit)?;
             println!("{}", forge_shared::emit_json(&result, cli.pretty)?);
+        }
+        Commands::WebSearchStatus => {
+            let status = forge_ingest::websearch::web_search_status();
+            println!("{}", forge_shared::emit_json(&status, cli.pretty)?);
+        }
+        Commands::WebSearchEnable { backend } => {
+            let engine = forge_ingest::websearch::SearchEngine::parse(&backend)?;
+            let enabled = forge_ingest::websearch::enable_backend(engine)?;
+            println!("{}", forge_shared::emit_json(&enabled, cli.pretty)?);
+        }
+        Commands::WebSearchDisable { backend } => {
+            let engine = forge_ingest::websearch::SearchEngine::parse(&backend)?;
+            let enabled = forge_ingest::websearch::disable_backend(engine)?;
+            println!("{}", forge_shared::emit_json(&enabled, cli.pretty)?);
         }
         Commands::IngestPaper {
             input,
