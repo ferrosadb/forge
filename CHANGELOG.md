@@ -31,6 +31,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FORGE_WEB_SEARCH_STATUS` so the test suite and pre-push hooks never rewrite a
   developer's home directory; the only effect of the gate is that the decision is
   not persisted.
+- **`frg web-search-skip <backend> --until <date>` / `frg web-search-resume`.** Park
+  a backend until a calendar date (`YYYY-MM-DD`, or `today` / `tomorrow`) and make no
+  requests to it until then. This exists because a cooldown is the wrong tool for a
+  reputation block: a block attaches to the egress IP and decays on the provider's
+  own schedule, so retrying on a short timer keeps the reputation warm and delays
+  recovery. While parked the backend is not even constructed, so a request is
+  impossible rather than merely unlikely; the pause lifts on its own at the end of
+  the named day, without anything having to run. `web_search_status` reports it as
+  `skipped` with the reason and resume date, as does a failed search's error text.
+  The MCP tools `web_search_skip` / `web_search_resume` expose the same decisions to
+  an agent.
+
+### Fixed
+
+- **The test suite no longer reads or writes the operator's real state.** Parking a
+  backend for a genuine reason (the block on this host) made three unrelated
+  `websearch` tests fail, because the state file was the same one the CLI uses.
+  Under `cfg(test)` the state path is now a per-process temporary file, and a test
+  guards that. `FORGE_WEB_SEARCH_STATE` overrides the path for integration tests and
+  operators.
 
 ### Changed
 

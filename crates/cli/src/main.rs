@@ -482,7 +482,25 @@ enum Commands {
 
     /// Disable a search backend
     WebSearchDisable {
-        /// Backend to disable: brave or searxng
+        /// Backend to disable: brave, duckduckgo, google, searxng
+        backend: String,
+    },
+
+    /// Park a search backend until a date, making no requests to it
+    WebSearchSkip {
+        /// Backend to park
+        backend: String,
+        /// Date to resume: YYYY-MM-DD, or `today` / `tomorrow`
+        #[arg(long)]
+        until: String,
+        /// Why it is parked (recorded with the pause)
+        #[arg(long, default_value = "cooling off")]
+        reason: String,
+    },
+
+    /// Resume a parked search backend immediately
+    WebSearchResume {
+        /// Backend to resume
         backend: String,
     },
 
@@ -3282,6 +3300,47 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
         }
     );
 
+    // web_search_skip — park a backend until a date, making no requests to it.
+    register_tool!(server, "web_search_skip",
+        "Stop sending requests to one search backend until a stated date. Use this when a backend has blocked or rate-limited this host: a block attaches to the egress IP and decays on the provider's own schedule, so retrying on a short timer keeps the reputation warm and delays recovery. While parked the backend is not probed at all, and web_search_status reports it as parked with the reason and the resume date.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "backend": {"type": "string", "description": "Backend to park: brave, duckduckgo, google, searxng"},
+                "until": {"type": "string", "description": "Date to resume: YYYY-MM-DD, or `today` / `tomorrow`"},
+                "reason": {"type": "string", "description": "Why it is parked, recorded with the pause"}
+            },
+            "required": ["backend", "until"]
+        }),
+        |args| {
+            let backend = args.get("backend").and_then(|v| v.as_str()).ok_or("backend is required")?;
+            let until = args.get("until").and_then(|v| v.as_str()).ok_or("until is required")?;
+            let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("cooling off");
+            let engine = forge_ingest::websearch::SearchEngine::parse(backend).map_err(|e| e.to_string())?;
+            let record = forge_ingest::websearch::skip_backend_until(engine, until, reason, "agent")
+                .map_err(|e| e.to_string())?;
+            serde_json::to_string_pretty(&record).map_err(|e| e.to_string())
+        }
+    );
+
+    // web_search_resume — lift a parked backend's pause.
+    register_tool!(server, "web_search_resume",
+        "Resume a search backend that web_search_skip parked, so it is probed again on the next call.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "backend": {"type": "string", "description": "Backend to resume: brave, duckduckgo, google, searxng"}
+            },
+            "required": ["backend"]
+        }),
+        |args| {
+            let backend = args.get("backend").and_then(|v| v.as_str()).ok_or("backend is required")?;
+            let engine = forge_ingest::websearch::SearchEngine::parse(backend).map_err(|e| e.to_string())?;
+            let resumed = forge_ingest::websearch::clear_skip(engine).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({"resumed": resumed}).to_string())
+        }
+    );
+
     // ingest_paper — extract knowledge from academic papers (arxiv, IEEE, ACM, DOI, PDF)
     register_tool!(server, "ingest_paper",
         "Ingest an academic paper into a knowledge graph. Accepts arxiv URLs, DOIs (doi:10.xxx), Semantic Scholar links, IEEE/ACM URLs, bioRxiv, PubMed IDs, or local PDF paths. Extracts title, authors, abstract, references, key concepts, and document structure. Cleanses untrusted paper text against prompt injection before persistence. Uses fmem smart_ingest for entities, then inserts typed edges (wrote, references, discusses, affiliated_with, contains) after remapping entity ids chosen by fmem. Use `dry_run: true` for extraction-only.",
@@ -5895,6 +5954,24 @@ fn main() -> anyhow::Result<()> {
             let engine = forge_ingest::websearch::SearchEngine::parse(&backend)?;
             let enabled = forge_ingest::websearch::disable_backend(engine)?;
             println!("{}", forge_shared::emit_json(&enabled, cli.pretty)?);
+        }
+        Commands::WebSearchSkip {
+            backend,
+            until,
+            reason,
+        } => {
+            let engine = forge_ingest::websearch::SearchEngine::parse(&backend)?;
+            let record =
+                forge_ingest::websearch::skip_backend_until(engine, &until, &reason, "operator")?;
+            println!("{}", forge_shared::emit_json(&record, cli.pretty)?);
+        }
+        Commands::WebSearchResume { backend } => {
+            let engine = forge_ingest::websearch::SearchEngine::parse(&backend)?;
+            let resumed = forge_ingest::websearch::clear_skip(engine)?;
+            println!(
+                "{}",
+                forge_shared::emit_json(&serde_json::json!({"resumed": resumed}), cli.pretty)?
+            );
         }
         Commands::IngestPaper {
             input,

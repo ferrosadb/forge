@@ -123,8 +123,10 @@ These commands ingest structured knowledge into ferrosa-memory via the `agent_me
 | `frg fetch-url <url>` | Fetch a web page through Forge's trusted HTTP path and return compact read-only text, sections, and links without persistence |
 | `frg web-search <query>` | Search the web. Works with no configuration: probes the built-in backend and any configured instance, and uses whichever answers |
 | `frg web-search-status` | Probe every search backend and report which is usable now, with the command that fixes one that is not |
-| `frg web-search-enable <backend>` | Enable `brave` or `searxng` after a probe has confirmed it answers |
+| `frg web-search-enable <backend>` | Enable a backend after a probe has confirmed it answers |
 | `frg web-search-disable <backend>` | Disable a backend |
+| `frg web-search-skip <backend> --until <date>` | Park a backend until a date, making no requests to it |
+| `frg web-search-resume <backend>` | Resume a parked backend now |
 | `frg ingest-paper <source>` | Ingest an academic paper (see [PDF ingestion](#pdf-ingestion)) |
 | `frg ingest-corpus <path>` | Ingest corpus markdown distillation files; creates L1/L2/L3 entities with deterministic UUID5 IDs |
 
@@ -140,6 +142,24 @@ instance is an accelerator, never a dependency — once it fails a probe it is
 fast-pathed around for a short window and retried afterwards, so a stopped
 instance costs a degraded fallback rather than a failed search. Run
 `web-search-status` to see the current verdict per backend.
+
+A backend that has *blocked* this host is a different problem from one that is
+merely down, and a short cooldown is the wrong tool for it. A block attaches to the
+egress IP and decays on the provider's own schedule, so retrying on a timer keeps
+the reputation warm and delays recovery. Park it instead:
+
+```bash
+frg web-search-skip brave --until tomorrow --reason "blocked; letting it decay"
+frg web-search-skip duckduckgo --until 2026-10-05
+frg web-search-resume brave        # lift the pause early
+```
+
+While parked, the backend is not constructed, so no request to it can be made at
+all — not merely made unlikely, as with a cooldown. `web-search-status` reports it as
+`skipped` with the reason and the resume date, and search degrades to the remaining
+backends rather than failing. A parked backend is listed in a failed search's error
+text too, so the reason is visible exactly when someone is wondering why search got
+worse.
 
 Forge resolves its own configuration, in this order:
 
@@ -324,6 +344,8 @@ Tools are split into two tiers:
 | `fetch_url` | `frg fetch-url` |
 | `web_search` | `frg web-search` |
 | `web_search_status` | `frg web-search-status` |
+| `web_search_skip` | `frg web-search-skip <backend> --until <date>` |
+| `web_search_resume` | `frg web-search-resume <backend>` |
 | `ingest_paper` | `frg ingest-paper` |
 | `ingest_corpus` | `frg ingest-corpus` |
 | `task_create` | `frg task create` |

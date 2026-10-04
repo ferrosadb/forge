@@ -175,6 +175,8 @@ pub enum ProbeState {
     Unavailable,
     /// The backend needs configuration that is absent.
     NotConfigured,
+    /// The operator parked the backend until a stated date. Not probed, by request.
+    Skipped,
 }
 
 /// One backend's probe result, safe to show an operator or an agent.
@@ -201,10 +203,25 @@ pub struct WebSearchStatus {
     pub backends: Vec<BackendProbe>,
     /// Backends explicitly enabled in state.
     pub enabled: Vec<SearchEngine>,
+    /// Backends deliberately parked until a date, with the reason.
+    pub parked: Vec<ParkedBackend>,
     /// Exact commands that turn a failed probe into a working search.
     pub enable_instructions: Vec<String>,
     /// True when this process may persist an enable/disable decision.
     pub state_writable: bool,
+}
+
+/// One deliberately parked backend, for operator-facing output.
+#[derive(Debug, Clone, Serialize)]
+pub struct ParkedBackend {
+    /// Which backend.
+    pub engine: SearchEngine,
+    /// The date the pause ends.
+    pub until: String,
+    /// Why it was parked.
+    pub reason: String,
+    /// Who parked it.
+    pub set_by: String,
 }
 
 /// A parsed, not-yet-scrubbed hit from any backend.
@@ -760,6 +777,11 @@ fn configured_google() -> Option<(String, String)> {
 
 /// Construct a backend for an engine, if it is usable at all.
 fn backend_for(engine: SearchEngine) -> Option<Box<dyn Backend>> {
+    // A parked backend is never constructed: the surest way not to make a request
+    // is to have nothing that can make one.
+    if skip_until_record(engine).is_some() {
+        return None;
+    }
     match engine {
         SearchEngine::Brave => Some(Box::new(BraveBackend)),
         SearchEngine::DuckDuckGo => Some(Box::new(DuckDuckGoBackend)),
@@ -768,6 +790,19 @@ fn backend_for(engine: SearchEngine) -> Option<Box<dyn Backend>> {
         SearchEngine::Searxng => configured_searxng()
             .map(|base_url| Box::new(SearxngBackend { base_url }) as Box<dyn Backend>),
     }
+}
+
+/// A backend that exists as a concept but is deliberately not being used.
+///
+/// Distinguished from "not configured" in operator-facing output: one needs a URL,
+/// the other needs patience.
+fn parked_hint(engine: SearchEngine) -> Option<String> {
+    skip_until_record(engine).map(|p| {
+        format!(
+            "parked until {} — {} (frg web-search-resume {})",
+            p.until_date, p.reason, engine
+        )
+    })
 }
 
 /// Probe every backend and report what actually happened.
@@ -781,19 +816,50 @@ pub fn probe_backends() -> Vec<BackendProbe> {
         .iter()
         .map(|engine| {
             let enabled = state.enabled.contains(engine);
+            // A deliberate pause is checked before configuration, so "parked" is
+            // never reported as "not configured" -- they need different actions.
             let Some(backend) = backend_for(*engine) else {
+                let parked = parked_hint(*engine);
                 return BackendProbe {
                     engine: *engine,
-                    endpoint: "(not configured)".to_string(),
-                    state: ProbeState::NotConfigured,
-                    detail: engine
-                        .configuration_hint()
-                        .unwrap_or("no configuration path for this backend")
-                        .to_string(),
+                    endpoint: if parked.is_some() {
+                        "(parked)".to_string()
+                    } else {
+                        "(not configured)".to_string()
+                    },
+                    state: if parked.is_some() {
+                        ProbeState::Skipped
+                    } else {
+                        ProbeState::NotConfigured
+                    },
+                    detail: parked.unwrap_or_else(|| {
+                        engine
+                            .configuration_hint()
+                            .unwrap_or("no configuration path for this backend")
+                            .to_string()
+                    }),
                     enabled,
                 };
             };
             let endpoint = backend.endpoint();
+
+            // A deliberate, dated pause wins over everything: the operator asked
+            // for no requests until a date, so this must not make one. Reporting
+            // the pause rather than a failure is the point -- an agent that finds
+            // search degraded should learn that waiting was chosen.
+            if let Some(pause) = skip_until_record(*engine) {
+                return BackendProbe {
+                    engine: *engine,
+                    endpoint,
+                    state: ProbeState::Skipped,
+                    detail: format!(
+                        "parked until {} — {} (set by {})",
+                        pause.until_date, pause.reason, pause.set_by
+                    ),
+                    enabled,
+                };
+            }
+
             // An explicit probe is the operator or agent asking "what is true right
             // now", so it always performs a real call and updates the health verdict
             // rather than trusting a cached one. It is paced like any other request:
@@ -867,6 +933,17 @@ pub fn web_search_status() -> WebSearchStatus {
         available,
         backends,
         enabled: state.enabled,
+        parked: state
+            .skip_until
+            .iter()
+            .filter(|(_, record)| record.until > now_epoch_secs())
+            .map(|(engine, record)| ParkedBackend {
+                engine: *engine,
+                until: record.until_date.clone(),
+                reason: record.reason.clone(),
+                set_by: record.set_by.clone(),
+            })
+            .collect(),
         enable_instructions,
         state_writable: state_writable(),
     }
@@ -888,6 +965,160 @@ struct SearchState {
     /// CLI run does not re-probe an instance the previous run already found down.
     #[serde(default)]
     unhealthy: HashMap<SearchEngine, PersistedHealth>,
+    /// Backends the operator has deliberately parked until a date, and why.
+    ///
+    /// This exists because the automatic cooldown is the wrong tool for a
+    /// reputation block. A block attaches to the host's egress IP and decays on the
+    /// provider's own schedule; retrying on a short timer keeps the reputation warm
+    /// and delays recovery. Parking a backend until a stated date lets the operator
+    /// pick the retry, which is the only thing that makes waiting work.
+    #[serde(default)]
+    skip_until: HashMap<SearchEngine, SkipUntil>,
+}
+
+/// A deliberate, dated pause on one backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkipUntil {
+    /// Unix epoch seconds at which the pause ends and probing resumes.
+    until: u64,
+    /// Human-readable date the operator gave, kept for reporting.
+    until_date: String,
+    /// Why the backend was parked, so the reason survives a restart.
+    reason: String,
+    /// Who asked for it.
+    set_by: String,
+    /// Unix epoch seconds when the pause was set.
+    set_at: u64,
+}
+
+/// Parse a calendar date into the unix second at which that date ends.
+///
+/// Accepts `YYYY-MM-DD`, and also `today` / `tomorrow` for the common case. The
+/// pause ends at the *end* of the named day, so "tomorrow" means the whole of
+/// tomorrow is skipped and probing resumes the day after. Times and time zones are
+/// deliberately not supported: this is a coarse decision about when to try again,
+/// and a date the operator has to think about is worse than a date they can read.
+fn parse_until_date(raw: &str) -> Result<(u64, String)> {
+    let today = (now_epoch_secs() / 86_400) as i64;
+    let days: i64 = match raw.trim().to_ascii_lowercase().as_str() {
+        "today" => today,
+        "tomorrow" => today + 1,
+        _ => {
+            let trimmed = raw.trim();
+            let parts: Vec<&str> = trimmed.split('-').collect();
+            if parts.len() != 3 {
+                bail!("date must be YYYY-MM-DD, or `today` / `tomorrow` (got `{trimmed}`)");
+            }
+            let year: i64 = parts[0]
+                .parse()
+                .with_context(|| format!("year in `{trimmed}` is not a number"))?;
+            let month: i64 = parts[1]
+                .parse()
+                .with_context(|| format!("month in `{trimmed}` is not a number"))?;
+            let day: i64 = parts[2]
+                .parse()
+                .with_context(|| format!("day in `{trimmed}` is not a number"))?;
+            if year < 1970 || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+                bail!("`{trimmed}` is not a plausible date");
+            }
+            let days = days_from_civil(year, month, day);
+            // Reject a date the calendar does not have, e.g. 2026-02-31, rather
+            // than rolling it into March and parking for the wrong month.
+            let (y, m, d) = civil_from_days(days);
+            if (y, m, d) != (year, month, day) {
+                bail!("`{trimmed}` is not a real calendar date");
+            }
+            days
+        }
+    };
+    // The last second of the named day, so the whole day is skipped.
+    let until = (days + 1) * 86_400 - 1;
+    Ok((until as u64, format_epoch_date(days)))
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date. Howard Hinnant's
+/// `days_from_civil`, which is the standard branch-free formulation.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Inverse of [`days_from_civil`], for validating a date round-trips.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Render a day count back as `YYYY-MM-DD`.
+fn format_epoch_date(days: i64) -> String {
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Whether a recorded pause is still in force at a given time.
+///
+/// Pure, so the boundary can be tested without touching the clock or the disk.
+fn skip_active(record: &SkipUntil, now_secs: u64) -> bool {
+    now_secs < record.until
+}
+
+/// Whether a backend is currently parked by an operator decision.
+///
+/// Returns the record so a caller can say *why* and *until when*, which is the
+/// whole point: an agent that finds search degraded should learn that waiting was
+/// deliberate, not that something broke.
+fn skip_until_record(engine: SearchEngine) -> Option<SkipUntil> {
+    let state = load_state().unwrap_or_default();
+    let record = state.skip_until.get(&engine)?.clone();
+    if skip_active(&record, now_epoch_secs()) {
+        Some(record)
+    } else {
+        None
+    }
+}
+
+/// Park a backend until a date, persisting the decision.
+pub fn skip_backend_until(
+    engine: SearchEngine,
+    date: &str,
+    reason: &str,
+    set_by: &str,
+) -> Result<SkipUntil> {
+    let (until, until_date) = parse_until_date(date)?;
+    let record = SkipUntil {
+        until,
+        until_date,
+        reason: reason.to_string(),
+        set_by: set_by.to_string(),
+        set_at: now_epoch_secs(),
+    };
+    let mut state = load_state().unwrap_or_default();
+    state.skip_until.insert(engine, record.clone());
+    save_state(&state)?;
+    Ok(record)
+}
+
+/// Clear a parked backend, so probing resumes on the next call.
+pub fn clear_skip(engine: SearchEngine) -> Result<bool> {
+    let mut state = load_state().unwrap_or_default();
+    let removed = state.skip_until.remove(&engine).is_some();
+    if removed {
+        save_state(&state)?;
+    }
+    Ok(removed)
 }
 
 /// A recorded backend failure and how long it parks the backend.
@@ -916,13 +1147,45 @@ fn state_writable() -> bool {
     )
 }
 
+/// Environment override for the state file location.
+///
+/// Exists so an integration test (which compiles the library without `cfg(test)`)
+/// or an operator can point the state somewhere else. The unit tests use the
+/// `cfg(test)` shim in [`state_path`] instead.
+#[cfg(not(test))]
+const STATE_PATH_ENV: &str = "FORGE_WEB_SEARCH_STATE";
+
 /// Path to the state file, beside forge's other per-user state.
 ///
 /// `dirs::config_dir()/forge/websearch.toml`, matching where forge already keeps
 /// `filters.toml` and `aliases.toml`, so a user looking for "where does forge put
-/// its settings" finds them together.
+/// its settings" finds them together. `FORGE_WEB_SEARCH_STATE` overrides it, and
+/// tests set that to a temporary file.
 fn state_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("forge").join("websearch.toml"))
+    // Under test, always use a per-process temporary file. Without this the suite
+    // reads the developer's real state, so parking a backend for a genuine reason
+    // makes unrelated tests fail -- exactly what happened when Brave was parked.
+    #[cfg(test)]
+    {
+        static TEST_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        Some(
+            TEST_PATH
+                .get_or_init(|| {
+                    std::env::temp_dir()
+                        .join(format!("forge-websearch-test-{}.toml", std::process::id()))
+                })
+                .clone(),
+        )
+    }
+    #[cfg(not(test))]
+    {
+        if let Ok(path) = std::env::var(STATE_PATH_ENV) {
+            if !path.trim().is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+        dirs::config_dir().map(|dir| dir.join("forge").join("websearch.toml"))
+    }
 }
 
 /// Load persisted state. A missing file is the default, not an error.
@@ -1098,11 +1361,14 @@ fn is_fast_path(engine: SearchEngine) -> bool {
 /// entirely, which is what keeps a stopped instance from failing a search.
 fn search_order() -> Vec<SearchEngine> {
     let mut order = Vec::new();
-    if configured_searxng().is_some() && !is_fast_path(SearchEngine::Searxng) {
+    if configured_searxng().is_some()
+        && !is_fast_path(SearchEngine::Searxng)
+        && skip_until_record(SearchEngine::Searxng).is_none()
+    {
         order.push(SearchEngine::Searxng);
     }
     for engine in SearchEngine::all() {
-        if order.contains(&engine) || is_fast_path(engine) {
+        if order.contains(&engine) || is_fast_path(engine) || skip_until_record(engine).is_some() {
             continue;
         }
         order.push(engine);
@@ -1111,10 +1377,18 @@ fn search_order() -> Vec<SearchEngine> {
         // Everything is on the fast path. Clear the verdicts and try once more:
         // otherwise a stale cache would silently make search unavailable forever,
         // which is worse than one wasted probe.
+        //
+        // Parked backends are deliberately NOT restored here. A stale cache is an
+        // accident; a pause is an instruction, and one probe is not cheap when the
+        // whole point is not to make it.
         if let Ok(mut cache) = health_cache().lock() {
             cache.clear();
         }
-        order.extend(SearchEngine::all());
+        order.extend(
+            SearchEngine::all()
+                .into_iter()
+                .filter(|engine| skip_until_record(*engine).is_none()),
+        );
     }
     order
 }
@@ -1132,7 +1406,26 @@ pub fn web_search(query: &str, limit: usize) -> Result<WebSearchResults> {
     let limit = limit.clamp(1, 50);
 
     let mut attempts: Vec<String> = Vec::new();
-    for engine in search_order() {
+    let order = search_order();
+    // Iterate every backend, not just the ones in the order: a parked backend is
+    // deliberately absent from the order, and dropping it from the report would
+    // hide the one fact that explains why search is degraded.
+    for engine in SearchEngine::all() {
+        // A parked backend is skipped without a request, and reported as parked so
+        // the caller learns waiting was deliberate.
+        if let Some(pause) = skip_until_record(engine) {
+            attempts.push(format!(
+                "{engine}: parked until {} — {}",
+                pause.until_date, pause.reason
+            ));
+            continue;
+        }
+        // Healthy-but-not-first-choice backends are not reported on success paths;
+        // only ones the order would actually try, so the message stays about what
+        // was attempted.
+        if !order.contains(&engine) {
+            continue;
+        }
         let Some(backend) = backend_for(engine) else {
             let hint = engine
                 .configuration_hint()
@@ -1194,7 +1487,8 @@ pub fn web_search(query: &str, limit: usize) -> Result<WebSearchResults> {
     }
     message.push_str(
         "Run `frg web-search-status` for detail, then \
-         `frg web-search-enable <backend>` to enable one.",
+         `frg web-search-enable <backend>` to enable one, \
+         or `frg web-search-resume <backend>` to lift a park.",
     );
     bail!(message)
 }
@@ -1539,13 +1833,114 @@ mod tests {
     fn search_state_lives_beside_forges_other_state() {
         // Not under $HOME/.forge: forge already keeps filters.toml and aliases.toml
         // under the platform config dir, and one tool's settings belong in one place.
-        if let Some(path) = state_path() {
+        //
+        // `state_path()` is overridden to a temp file under `cfg(test)`, so assert
+        // against the production rule directly rather than the test shim.
+        let production = dirs::config_dir().map(|dir| dir.join("forge").join("websearch.toml"));
+        if let Some(path) = production {
             assert!(
                 path.ends_with("forge/websearch.toml"),
                 "got {}",
                 path.display()
             );
+            assert!(
+                !path.to_string_lossy().contains("/.forge/"),
+                "state must not sit under a private dot-dir"
+            );
         }
+    }
+
+    #[test]
+    fn tests_never_read_or_write_the_operators_real_state() {
+        // Guards the shim itself: if this regresses, a genuine operator decision
+        // (e.g. parking a blocked backend) starts breaking unrelated tests again.
+        let path = state_path().expect("a state path under test");
+        assert!(
+            path.to_string_lossy().contains("forge-websearch-test-"),
+            "tests must use an isolated state file, got {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn date_parsing_accepts_shorthands_and_calendar_dates() {
+        let (until, label) = parse_until_date("tomorrow").unwrap();
+        let today = (now_epoch_secs() / 86_400) as i64;
+        assert_eq!(
+            until,
+            ((today + 2) * 86_400 - 1) as u64,
+            "tomorrow ends at end of tomorrow"
+        );
+        assert_eq!(label, format_epoch_date(today + 1));
+
+        let (until, label) = parse_until_date("today").unwrap();
+        assert_eq!(until, ((today + 1) * 86_400 - 1) as u64);
+        assert_eq!(label, format_epoch_date(today));
+
+        // A fixed date round-trips through the civil-date conversion.
+        let (until, label) = parse_until_date("2027-03-01").unwrap();
+        assert_eq!(label, "2027-03-01");
+        assert_eq!(until, (days_from_civil(2027, 3, 1) as u64 + 1) * 86_400 - 1);
+    }
+
+    #[test]
+    fn date_parsing_rejects_impossible_and_malformed_dates() {
+        // A date the calendar does not have must be refused, not rolled forward
+        // into the next month: parking until the wrong month is a silent failure.
+        for bad in [
+            "2026-02-31",
+            "2026-13-01",
+            "2026-00-10",
+            "not-a-date",
+            "2026/03/01",
+            "",
+        ] {
+            assert!(parse_until_date(bad).is_err(), "should reject {bad}");
+        }
+        // Leap day is real in a leap year and not in a common one.
+        assert!(parse_until_date("2028-02-29").is_ok());
+        assert!(parse_until_date("2027-02-29").is_err());
+    }
+
+    #[test]
+    fn a_skip_is_active_only_until_its_date_passes() {
+        // The pause must expire on its own. A park that never lifts is an outage
+        // the operator has to remember to fix, which is worse than the block.
+        let record = SkipUntil {
+            until: 2_000_000_000,
+            until_date: "2033-05-18".to_string(),
+            reason: "test".to_string(),
+            set_by: "unit".to_string(),
+            set_at: 0,
+        };
+        assert!(
+            skip_active(&record, 1_999_999_999),
+            "still parked before the date"
+        );
+        assert!(!skip_active(&record, 2_000_000_000), "expired at the date");
+        assert!(
+            !skip_active(&record, 2_000_000_001),
+            "expired after the date"
+        );
+    }
+
+    #[test]
+    fn parking_round_trips_through_its_date() {
+        // A park set for a real date must report that date back, so status output
+        // and the resume command agree about when the pause ends.
+        let (until, label) = parse_until_date("2027-01-15").unwrap();
+        let record = SkipUntil {
+            until,
+            until_date: label.clone(),
+            reason: "blocked".to_string(),
+            set_by: "operator".to_string(),
+            set_at: now_epoch_secs(),
+        };
+        assert_eq!(record.until_date, "2027-01-15");
+        assert!(
+            skip_active(&record, now_epoch_secs()),
+            "a future date is active"
+        );
     }
 
     #[test]
