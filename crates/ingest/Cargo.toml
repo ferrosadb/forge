@@ -19,7 +19,7 @@ forge-fmem-client = { path = "../fmem-client" }
 which = "7"
 ureq = { version = "3", features = ["json"] }
 walkdir = "2"
-serde_yaml = "0.9"
+serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
 sha2 = "0.10"
 hex = "0.4"
 thiserror = "1"
