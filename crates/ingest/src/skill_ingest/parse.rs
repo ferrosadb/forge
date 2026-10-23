@@ -79,7 +79,7 @@ pub enum ParseError {
     /// Unterminated frontmatter — only an opening `---`.
     UnterminatedFrontmatter,
     /// YAML parse error inside frontmatter.
-    Yaml(serde_yaml::Error),
+    Yaml(serde_saphyr::Error),
     /// Required field missing from frontmatter.
     MissingField(&'static str),
 }
@@ -149,7 +149,7 @@ struct Frontmatter {
     supplementary_files: Vec<String>,
     /// Capture anything else so unknown fields don't fail parsing.
     #[serde(flatten)]
-    _extra: BTreeMap<String, serde_yaml::Value>,
+    _extra: BTreeMap<String, serde::de::IgnoredAny>,
 }
 
 /// Parse a SKILL.md byte buffer into a `Skill`.
@@ -179,7 +179,7 @@ pub fn parse_from(
     let text = std::str::from_utf8(bytes).map_err(|_| ParseError::NotUtf8)?;
 
     let (fm_str, body_str) = split_frontmatter(text)?;
-    let fm: Frontmatter = serde_yaml::from_str(fm_str).map_err(ParseError::Yaml)?;
+    let fm: Frontmatter = serde_saphyr::from_str(fm_str).map_err(ParseError::Yaml)?;
 
     let name = fm.name.ok_or(ParseError::MissingField("name"))?;
     let description = fm
@@ -482,6 +482,14 @@ fn strip_list_marker(s: &str) -> &str {
 mod tests {
     use super::*;
 
+    const PINNED_NUMERIC_NAME: Option<&str> = Some("123");
+    const PINNED_DUPLICATE_KEY_IS_ERROR: bool = true;
+    // serde_yaml rejected a `!tag` inside an unknown field ("untagged and
+    // internally tagged enums do not support enum input" through the
+    // flattened map). Unknown fields are documented as tolerated, so
+    // serde_saphyr accepting it is the intended behaviour, not drift.
+    const PINNED_TAGGED_EXTRA_IS_ERROR: bool = false;
+
     fn skill_with(frontmatter: &str, body: &str) -> Result<Skill, ParseError> {
         let mut s = String::new();
         s.push_str("---\n");
@@ -720,6 +728,92 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.argument_hint.as_deref(), Some("[foo bar baz]"));
+    }
+
+    // ---- YAML parser characterization -------------------------------
+    //
+    // Pinned while moving off serde_yaml (unmaintained unsafe-libyaml,
+    // RUSTSEC-2024-0449). Each case records what SKILL.md frontmatter
+    // parsing did under serde_yaml so a parser swap cannot drift silently.
+
+    #[test]
+    fn yaml_folded_and_literal_block_scalars() {
+        let s = skill_with(
+            "name: x\ndescription: >\n  one\n  two\nargument-hint: |\n  a\n  b\n",
+            "body",
+        )
+        .unwrap();
+        assert_eq!(s.description, "one two\n");
+        assert_eq!(s.argument_hint.as_deref(), Some("a\nb\n"));
+    }
+
+    #[test]
+    fn yaml_quoted_string_with_colon_and_hash() {
+        let s = skill_with("name: 'a: b'\ndescription: \"c # d\"\n", "body").unwrap();
+        assert_eq!(s.name, "a: b");
+        assert_eq!(s.description, "c # d");
+    }
+
+    #[test]
+    fn yaml_aliases_resolve() {
+        let s = skill_with(
+            "name: x\ndescription: y\nkeywords: &k [alpha, beta]\ntags: *k\n",
+            "body",
+        )
+        .unwrap();
+        assert_eq!(s.trigger_keywords, vec!["alpha", "beta"]);
+        assert_eq!(s.tags, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn yaml_null_name_is_missing_field() {
+        let err = skill_with("name: ~\ndescription: y\n", "body").unwrap_err();
+        assert!(matches!(err, ParseError::MissingField("name")));
+    }
+
+    #[test]
+    fn yaml_empty_keywords_list_derives_from_description() {
+        let s = skill_with(
+            "name: x\ndescription: build widgets\nkeywords: []\n",
+            "body",
+        )
+        .unwrap();
+        assert!(!s.trigger_keywords.is_empty());
+    }
+
+    #[test]
+    fn yaml_unknown_nested_fields_tolerated() {
+        let s = skill_with(
+            "name: x\ndescription: y\nmeta:\n  deep: {a: [1, 2]}\n",
+            "body",
+        )
+        .unwrap();
+        assert_eq!(s.name, "x");
+    }
+
+    #[test]
+    fn yaml_tagged_unknown_field() {
+        let r = skill_with("name: x\ndescription: y\nodd: !custom value\n", "body");
+        assert_eq!(r.is_err(), PINNED_TAGGED_EXTRA_IS_ERROR);
+    }
+
+    #[test]
+    fn yaml_bool_like_words_stay_strings() {
+        let s = skill_with("name: x\ndescription: yes\ntags: [on, off, no]\n", "body").unwrap();
+        assert_eq!(s.description, "yes");
+        assert_eq!(s.tags, vec!["on", "off", "no"]);
+    }
+
+    #[test]
+    fn yaml_numeric_scalar_for_string_field() {
+        let r = skill_with("name: 123\ndescription: y\n", "body");
+        assert_eq!(r.map(|s| s.name).ok().as_deref(), PINNED_NUMERIC_NAME);
+    }
+
+    #[test]
+    fn yaml_duplicate_keys() {
+        let r = skill_with("name: a\nname: b\ndescription: y\n", "body");
+        assert_eq!(r.is_err(), PINNED_DUPLICATE_KEY_IS_ERROR);
     }
 
     #[test]

@@ -22,8 +22,8 @@
 //! Security properties:
 //! - Per-file cap of 64 KiB (threat-model T5 — YAML bomb).
 //! - Edge count cap of 1000 (threat-model D4).
-//! - Safe loader via `serde_yaml` — no anchor resolution beyond the
-//!   default.
+//! - Safe loader via `serde_saphyr`, whose default budget also bounds
+//!   alias expansion.
 
 use std::fs;
 use std::path::Path;
@@ -46,7 +46,7 @@ pub const HIERARCHY_FILENAME: &str = "tag-hierarchy.yaml";
 pub enum HierarchyError {
     TooLarge { actual: usize, max: usize },
     TooManyEdges { actual: usize, max: usize },
-    Yaml(serde_yaml::Error),
+    Yaml(serde_saphyr::Error),
     Io(std::io::Error),
     InvalidTagName { raw: String, reason: &'static str },
     SelfLoop { node: String },
@@ -114,7 +114,7 @@ pub fn parse_hierarchy(skill_root: &Path) -> Result<HierarchyOutcome, HierarchyE
         reason: "hierarchy file is not valid UTF-8",
     })?;
 
-    let doc: HierarchyDoc = serde_yaml::from_str(text).map_err(HierarchyError::Yaml)?;
+    let doc: HierarchyDoc = serde_saphyr::from_str(text).map_err(HierarchyError::Yaml)?;
 
     let edges = doc.into_edges()?;
     if edges.len() > MAX_HIERARCHY_EDGES {
@@ -143,7 +143,10 @@ pub fn parse_hierarchy(skill_root: &Path) -> Result<HierarchyOutcome, HierarchyE
 struct HierarchyDoc {
     /// Flat map: child → parent.
     #[serde(default, flatten)]
-    flat: std::collections::BTreeMap<String, serde_yaml::Value>,
+    ///
+    /// serde_saphyr has no YAML value type; `serde_json::Value` is used only
+    /// to name the type of a non-string parent in the error.
+    flat: std::collections::BTreeMap<String, serde_json::Value>,
     /// Explicit list of `{child, parent}` records.
     #[serde(default)]
     edges: Vec<EdgeRecord>,
@@ -169,7 +172,7 @@ impl HierarchyDoc {
         for (child, parent_val) in self.flat {
             // Flat shape only accepts scalar parent names.
             match parent_val {
-                serde_yaml::Value::String(parent) => {
+                serde_json::Value::String(parent) => {
                     out.push(make_edge(&child, &parent)?);
                 }
                 other => {
@@ -184,15 +187,14 @@ impl HierarchyDoc {
     }
 }
 
-fn short_type(v: &serde_yaml::Value) -> &'static str {
+fn short_type(v: &serde_json::Value) -> &'static str {
     match v {
-        serde_yaml::Value::Null => "null",
-        serde_yaml::Value::Bool(_) => "bool",
-        serde_yaml::Value::Number(_) => "number",
-        serde_yaml::Value::String(_) => "string",
-        serde_yaml::Value::Sequence(_) => "sequence",
-        serde_yaml::Value::Mapping(_) => "mapping",
-        serde_yaml::Value::Tagged(_) => "tagged",
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "sequence",
+        serde_json::Value::Object(_) => "mapping",
     }
 }
 
@@ -319,6 +321,52 @@ mod tests {
         );
         let err = parse_hierarchy(tmp.path()).unwrap_err();
         assert!(matches!(err, HierarchyError::InvalidTagName { .. }));
+    }
+
+    // ---- YAML parser characterization (see parse.rs) ---------------
+
+    fn flat_parent_error(body: &str) -> String {
+        let tmp = TempDir::new().unwrap();
+        write_hierarchy(tmp.path(), body);
+        let err = parse_hierarchy(tmp.path()).unwrap_err();
+        assert!(matches!(err, HierarchyError::Yaml(_)), "got {err:?}");
+        err.to_string()
+    }
+
+    #[test]
+    fn flat_non_string_parents_report_their_type() {
+        assert!(flat_parent_error("tdd: [a, b]\n")
+            .contains("expected string parent for `tdd`, got \"sequence\""));
+        assert!(flat_parent_error("tdd: {a: b}\n").contains("got \"mapping\""));
+        assert!(flat_parent_error("tdd:\n").contains("got \"null\""));
+        assert!(flat_parent_error("tdd: true\n").contains("got \"bool\""));
+        assert!(flat_parent_error("tdd: 5\n").contains("got \"number\""));
+    }
+
+    #[test]
+    fn flat_shape_with_aliases_and_quotes() {
+        let tmp = TempDir::new().unwrap();
+        write_hierarchy(tmp.path(), "tdd: &p testing\nbdd: *p\n'a b': \"quality\"\n");
+        let HierarchyOutcome::Loaded(edges) = parse_hierarchy(tmp.path()).unwrap() else {
+            panic!("expected Loaded");
+        };
+        let pairs: Vec<(String, String)> = edges.into_iter().map(|e| (e.child, e.parent)).collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("a-b".to_string(), "quality".to_string()),
+                ("bdd".to_string(), "testing".to_string()),
+                ("tdd".to_string(), "testing".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_shape_missing_parent_is_yaml_error() {
+        let tmp = TempDir::new().unwrap();
+        write_hierarchy(tmp.path(), "edges:\n  - child: tdd\n");
+        let err = parse_hierarchy(tmp.path()).unwrap_err();
+        assert!(matches!(err, HierarchyError::Yaml(_)));
     }
 
     #[test]
