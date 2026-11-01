@@ -45,7 +45,7 @@ jobs:
             artifact: frg-linux-aarch64
             binary: frg
             archive: tar.gz
-          - os: macos-14
+          - os: macos-15
             artifact: frg-macos-aarch64
             binary: frg
             archive: tar.gz
