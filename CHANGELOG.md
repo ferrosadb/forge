@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Task deletion (`frg task delete`).** Deletes one or many tasks (`--ids-from
+  FILE`, or `-` for stdin). A task with links or comments is refused unless
+  `--force`, which removes both rows of every link and every comment with it,
+  so no task is left pointing at a deleted one. A missing id fails the command
+  after the rest are attempted; `--dry-run` reports without deleting. Added
+  because a board had reached 45,566 duplicate hook-created tasks and the only
+  way to remove them was raw CQL that knew nothing about links or comments.
 - **Cognitive complexity analysis (`frg cognitive-complexity`).** Ranks Rust
   functions by [SonarSource cognitive complexity][cog], computed from the AST via
   the `complexity` crate. Cyclomatic complexity counts branches; cognitive

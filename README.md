@@ -147,6 +147,7 @@ scrubbed text. No LLM summarizer is invoked in the search path.
 | `frg task list [--status STATUS]` | List tasks; filter by status |
 | `frg task link <src> <dst> <type>` | Create a typed link between two tasks |
 | `frg task unlink <src> <dst> <type>` | Remove a task link |
+| `frg task delete <id>... [--ids-from FILE] [--force] [--dry-run]` | Delete tasks; refuses a linked or commented task unless `--force`, a missing id is an error |
 | `frg task comment <id> <body>` | Add a comment to a task |
 | `frg task board` | Render the kanban board grouped by status |
 | `frg checklist <action>` | Persistent workflow checklists with dependencies, leases, attempts, waiting gates, reviews, and scoring |

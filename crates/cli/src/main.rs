@@ -1158,6 +1158,25 @@ enum TaskAction {
         #[arg(long)]
         cql_host: Option<String>,
     },
+    /// Delete tasks. A task with links or comments is refused unless --force,
+    /// which deletes those with it. A missing id is an error, not a no-op.
+    Delete {
+        /// Task IDs to delete
+        ids: Vec<String>,
+        /// Also read task IDs from FILE, one per line ("-" for stdin; blank
+        /// lines and lines starting with # are skipped)
+        #[arg(long, value_name = "FILE")]
+        ids_from: Option<String>,
+        /// Delete each task together with its links and comments
+        #[arg(long)]
+        force: bool,
+        /// Report what would be deleted and delete nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// CQL host (overrides FORGE_CQL_HOST / .forge/config.toml; default 127.0.0.1:9042)
+        #[arg(long)]
+        cql_host: Option<String>,
+    },
     /// Remove a link between two tasks
     Unlink {
         /// Parent task ID
@@ -6609,6 +6628,19 @@ fn handle_task(action: TaskAction, pretty: bool) -> anyhow::Result<()> {
             println!("Linked {} \u{2192} {}", parent_id, child_id);
         }
 
+        TaskAction::Delete {
+            ids,
+            ids_from,
+            force,
+            dry_run,
+            cql_host,
+        } => {
+            let ids = collect_task_ids(ids, ids_from.as_deref())?;
+            let cql_hosts = forge_tasks::resolve_cql_hosts(cql_host.as_deref())?;
+            let store = forge_tasks::TaskStore::connect(&cql_hosts, None)?;
+            run_task_delete(&store, &ids, force, dry_run)?;
+        }
+
         TaskAction::Unlink {
             parent_id,
             child_id,
@@ -6860,5 +6892,116 @@ mod run_status_line_tests {
         assert!(!saw_cargo_lock_wait(
             "Compiling forge v0.1.0\nrunning 3 tests\n"
         ));
+    }
+}
+
+/// Task ids from the command line plus `--ids-from` (a file, or `-` for
+/// stdin), in order, without duplicates. Blank lines and `#` comments in the
+/// file are skipped. No ids at all is an error: `frg task delete` that
+/// silently does nothing looks exactly like one that worked.
+fn collect_task_ids(mut ids: Vec<String>, ids_from: Option<&str>) -> anyhow::Result<Vec<String>> {
+    use anyhow::Context as _;
+    if let Some(source) = ids_from {
+        let text = if source == "-" {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                .context("read task ids from stdin")?;
+            text
+        } else {
+            std::fs::read_to_string(source)
+                .with_context(|| format!("read task ids from {source}"))?
+        };
+        ids.extend(parse_task_id_lines(&text));
+    }
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+    anyhow::ensure!(
+        !ids.is_empty(),
+        "no task ids given: pass ids or --ids-from FILE"
+    );
+    Ok(ids)
+}
+
+fn parse_task_id_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Delete (or, with `dry_run`, report) each id; one JSON line per id on
+/// stdout, a summary on stderr. Any failure makes the command fail after the
+/// rest have been attempted, naming the first few.
+fn run_task_delete(
+    store: &forge_tasks::TaskStore,
+    ids: &[String],
+    force: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let mut failed: Vec<String> = Vec::new();
+    let mut done = 0usize;
+    for id in ids {
+        let line = if dry_run {
+            match store.find_task(id) {
+                Ok(Some(found)) => serde_json::json!({
+                    "task_id": id, "would_delete": true, "title": found.task.title,
+                    "links": found.parents.len() + found.children.len(),
+                }),
+                Ok(None) => {
+                    failed.push(format!("{id}: not found"));
+                    continue;
+                }
+                Err(e) => {
+                    failed.push(format!("{id}: {e:#}"));
+                    continue;
+                }
+            }
+        } else {
+            match store.delete_task(id, force) {
+                Ok(outcome) => serde_json::to_value(&outcome)?,
+                Err(e) => {
+                    failed.push(format!("{id}: {e:#}"));
+                    continue;
+                }
+            }
+        };
+        done += 1;
+        println!("{line}");
+    }
+    let verb = if dry_run { "would delete" } else { "deleted" };
+    eprintln!(
+        "{verb} {done} of {} task(s); {} failed",
+        ids.len(),
+        failed.len()
+    );
+    if !failed.is_empty() {
+        let shown: Vec<&str> = failed.iter().take(5).map(String::as_str).collect();
+        anyhow::bail!("{} task(s) not deleted: {}", failed.len(), shown.join("; "));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod task_delete_tests {
+    use super::*;
+
+    #[test]
+    fn id_lines_skip_blanks_and_comments_and_trim() {
+        assert_eq!(
+            parse_task_id_lines("# header\n t_1 \n\n#t_x\nt_2\n"),
+            vec!["t_1".to_string(), "t_2".to_string()]
+        );
+    }
+
+    #[test]
+    fn duplicate_ids_are_deleted_once_in_first_seen_order() {
+        let ids = collect_task_ids(vec!["t_2".into(), "t_1".into(), "t_2".into()], None).unwrap();
+        assert_eq!(ids, vec!["t_2".to_string(), "t_1".to_string()]);
+    }
+
+    #[test]
+    fn no_ids_is_an_error() {
+        assert!(collect_task_ids(Vec::new(), None).is_err());
     }
 }
