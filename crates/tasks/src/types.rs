@@ -157,6 +157,15 @@ pub struct Comment {
     pub created_at: i64,
 }
 
+/// What [`crate::TaskStore::delete_task`] removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeleteOutcome {
+    pub task_id: String,
+    /// Link rows removed, counting each parent/child pair once.
+    pub links_removed: usize,
+    pub comments_removed: usize,
+}
+
 // ---------------------------------------------------------------------------
 // Request / Patch types
 // ---------------------------------------------------------------------------
