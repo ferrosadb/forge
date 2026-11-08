@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use uuid::Uuid;
 
 use crate::schema::{
@@ -705,6 +705,80 @@ impl TaskStore {
         cql_exec!(self.rt, &self.session, cql1).context("unlink_tasks DELETE parent side")?;
         cql_exec!(self.rt, &self.session, cql2).context("unlink_tasks DELETE child side")?;
         Ok(())
+    }
+
+    /// Delete a task.
+    ///
+    /// A task that is linked to another or carries comments is refused unless
+    /// `force` is set, because deleting it silently would leave the other end
+    /// of each link pointing at nothing. With `force`, both rows of every link
+    /// (the parent's `child` row and the child's `parent` row) and every
+    /// comment are deleted first, then the task. A task that does not exist is
+    /// an error, never a quiet success: the caller may have the wrong board.
+    pub fn delete_task(&self, task_id: &str, force: bool) -> Result<crate::DeleteOutcome> {
+        let found = self
+            .find_task(task_id)?
+            .ok_or_else(|| anyhow!("Task not found: {task_id} (tenant {})", self.tenant_id))?;
+        let comment_ids = self.comment_ids(task_id)?;
+        let links = found.parents.len() + found.children.len();
+        if (links > 0 || !comment_ids.is_empty()) && !force {
+            bail!(
+                "refusing to delete {task_id}: it has {links} link(s) and {} comment(s); \
+                 pass --force to delete it together with them",
+                comment_ids.len()
+            );
+        }
+        for parent in &found.parents {
+            self.unlink_tasks(&parent.task_id, task_id)?;
+        }
+        for child in &found.children {
+            self.unlink_tasks(task_id, &child.task_id)?;
+        }
+        for comment_id in &comment_ids {
+            let cql = format!(
+                "DELETE FROM agent_memory.task_comments WHERE tenant_id={tenant} AND comment_id={comment_id}",
+                tenant = self.tenant_id,
+            );
+            cql_exec!(self.rt, &self.session, cql).context("delete_task: DELETE comment")?;
+        }
+        let cql = format!(
+            "DELETE FROM agent_memory.tasks WHERE tenant_id={tenant} AND task_id='{tid}'",
+            tenant = self.tenant_id,
+            tid = esc(task_id),
+        );
+        cql_exec!(self.rt, &self.session, cql).context("delete_task: DELETE task")?;
+        Ok(crate::DeleteOutcome {
+            task_id: task_id.to_string(),
+            links_removed: links,
+            comments_removed: comment_ids.len(),
+        })
+    }
+
+    /// Every comment id of `task_id` (not just the recent ten `find_task` shows).
+    fn comment_ids(&self, task_id: &str) -> Result<Vec<uuid::Uuid>> {
+        use scylla::frame::response::result::CqlValue;
+        let cql = format!(
+            "SELECT comment_id FROM agent_memory.task_comments \
+             WHERE tenant_id={tenant} AND task_id='{tid}'",
+            tenant = self.tenant_id,
+            tid = esc(task_id),
+        );
+        let result = cql_exec!(self.rt, &self.session, cql)
+            .context("delete_task: fetch comment ids")?
+            .into_legacy_result()
+            .context("delete_task: comment ids legacy result")?;
+        let mut ids = Vec::new();
+        for row in result
+            .rows()
+            .context("delete_task: expected comment id rows")?
+        {
+            match row.columns.into_iter().next().flatten() {
+                Some(CqlValue::Timeuuid(t)) => ids.push(uuid::Uuid::from(t)),
+                Some(CqlValue::Uuid(u)) => ids.push(u),
+                other => bail!("task_comments.comment_id has an unexpected value: {other:?}"),
+            }
+        }
+        Ok(ids)
     }
 
     /// Add a comment to a task.
