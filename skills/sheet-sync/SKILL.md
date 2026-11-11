@@ -89,7 +89,7 @@ frg sheet pull <alias>
 
 ## Work a bug
 
-Pick an open task (`frg task-board` / `mcp__forge__task_*`), fix it TDD-style
+Pick an open task (`frg task board` / `mcp__forge__task_*`), fix it TDD-style
 as usual.
 
 ## Push status back
