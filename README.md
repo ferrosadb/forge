@@ -105,7 +105,7 @@ reads it.
 |---------|-------------|
 | `frg digest [paths...]` | Token-efficient structural summary: functions, types, imports — no bodies. Best first call on an unfamiliar file |
 | `frg excerpt <target> [--context N]` | Extract a single named symbol with surrounding context lines |
-| `frg lookup <symbol> [dir]` | Find symbol definitions across the project |
+| `frg lookup <symbol> [--dir DIR]` | Find symbol definitions across the project |
 | `frg outline <file>` | Extract function signatures, type definitions, and module structure from a single file |
 | `frg glob <pattern> [--format brief\|json\|csv\|table]` | Find files matching a glob pattern; returns bounded per-file path, size, line count, modification time, and generated-file metadata |
 | `frg project-detect [dir]` | Auto-detect project type, languages, frameworks, and applicable forge tools |
@@ -141,14 +141,14 @@ scrubbed text. No LLM summarizer is invoked in the search path.
 
 | Command | Description |
 |---------|-------------|
-| `frg task create <title>` | Create a task in the CQL-backed kanban store |
+| `frg task create --title TITLE` | Create a task in the CQL-backed kanban store |
 | `frg task update <id>` | Update task status, assignee, priority, or body |
 | `frg task get <id>` | Fetch a single task by ID |
 | `frg task list [--status STATUS]` | List tasks; filter by status |
-| `frg task link <src> <dst> <type>` | Create a typed link between two tasks |
-| `frg task unlink <src> <dst> <type>` | Remove a task link |
+| `frg task link <parent> <child>` | Link two tasks, parent to child |
+| `frg task unlink <parent> <child>` | Remove a task link |
 | `frg task delete <id>... [--ids-from FILE] [--force] [--dry-run]` | Delete tasks; refuses a linked or commented task unless `--force`, a missing id is an error |
-| `frg task comment <id> <body>` | Add a comment to a task |
+| `frg task comment <id> --body BODY` | Add a comment to a task |
 | `frg task board` | Render the kanban board grouped by status |
 | `frg checklist <action>` | Persistent workflow checklists with dependencies, leases, attempts, waiting gates, reviews, and scoring |
 | `frg fmem-skill-ingest [--root <dir>]` | Ingest the SKILL.md catalog into ferrosa-memory as typed skill entities |
@@ -230,7 +230,7 @@ separate line when `--tee` saved the raw output on failure. Set
 | `frg context [--session ID] [--clear]` | Show or clear tracked files and symbols for an agent session |
 | `frg context-check [dir]` | Report available ferrosa-memory context for a project |
 | `frg tool-aliases [--format FORMAT]` | Return the alias map for tool name mismatches between callers and forge |
-| `frg version` | Print installed frg version |
+| `frg --version` | Print installed frg version |
 
 ---
 
@@ -262,7 +262,7 @@ Tools are split into two tiers:
 | `git_summary` | git status / log / diff (structured) |
 | `list` | list all available forge tools |
 | `tool_aliases` | `frg tool-aliases` |
-| `version` | `frg version` |
+| `version` | `frg --version` |
 | `test_summary` | `frg test-summary` |
 | `log_distill` | `frg log-distill` |
 | `diff_filter` | `frg diff-filter` |
