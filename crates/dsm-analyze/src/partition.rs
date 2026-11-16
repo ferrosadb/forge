@@ -97,9 +97,9 @@ pub fn partition(matrix: &DsmMatrix) -> PartitionResult {
     // dependencies should be below diagonal. Feedback = data[i][j] > 0 where i < j.
     let reordered = matrix.reorder(&order);
     let mut feedback_count = 0;
-    for i in 0..n {
-        for j in (i + 1)..n {
-            if reordered.data[i][j] > 0.0 {
+    for (i, row) in reordered.data.iter().enumerate().take(n) {
+        for value in row.iter().take(n).skip(i + 1) {
+            if *value > 0.0 {
                 feedback_count += 1;
             }
         }
