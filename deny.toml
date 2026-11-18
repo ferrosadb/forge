@@ -19,7 +19,12 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+    # chrono is unmaintained with no patched release. Forge uses it directly
+    # and through scylla 0.15 (forge-tasks). Remove this entry when Forge drops
+    # chrono, as ferrosa did with its own temporal module and chrono-free forks.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no patched release; used directly and via scylla 0.15" },
+]
 
 [licenses]
 # Workspace crates don't declare `license = ...` individually — they're
