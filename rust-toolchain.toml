@@ -1,0 +1,12 @@
+# Pin the Rust toolchain so local builds and CI use one compiler, in lockstep
+# with ferrosa, ferrosa-memory-private, ferrosa-dbaas and ferrosa-mobile.
+#
+# Unpinned, CI took the runner's "stable". When Rust 1.100.0 became stable,
+# workspace coverage under cargo-llvm-cov 0.8.4 dropped from about 72% to about
+# 19% and new Clippy lints failed code already on main, so every PR went red
+# with no change of its own. Bump this together with the other repos'
+# rust-toolchain.toml.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+profile = "minimal"
