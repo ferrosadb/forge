@@ -64,6 +64,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`frg todo-extract` leaves a line's age unknown when git reports an author
   time outside years -9999..=9999.** It used to report that line as zero days
   old.
+- **`frg cognitive-complexity` scores `let ... else` statements.** The scorer
+  is now an in-crate syn 2 port of the `complexity` 0.2 crate, which was built
+  on syn 1. syn 1 read a let-else statement as unparsed tokens, so its
+  initializer and `else` block scored nothing. Functions that use let-else
+  score one or two points higher; over forge and ferrosa that is 177 of
+  30,590 functions, and every other score is unchanged. Files using syntax
+  syn 1 could not parse, such as `c"..."` literals, are now scored instead of
+  reported as failures.
+- **Fewer duplicate crate versions in the build.** dirs 7, ureq 3.5, base64
+  0.23, getrandom 0.4 and thiserror 2 cut cargo-deny's duplicate warnings
+  from 20 to 8.
 
 ### Fixed
 
