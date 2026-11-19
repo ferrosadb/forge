@@ -2,8 +2,6 @@
 
 Token-saving tools for coding agents. A single binary (`frg`) with structured-JSON subcommands and an MCP server, so agents can consume compact, machine-readable output instead of raw terminal noise. Forge also includes a Claude Code hook integration and a Goose workflow skill.
 
-**Current version:** 0.14.0
-
 [![CI](https://github.com/ferrosadb/forge/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrosadb/forge/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
@@ -22,11 +20,46 @@ Raw `cargo`, `go test`, `pytest`, and `git diff` output is verbose and token-exp
 
 ## Installation
 
+Pick one of three routes.
+
+### Homebrew (macOS Apple silicon, Linux x86_64)
+
+```sh
+brew install ferrosadb/tap/forge
+frg --version
+```
+
+### Release download
+
+Download the archive for your platform from the
+[latest release](https://github.com/ferrosadb/forge/releases/latest), check it
+against the release's `SHA256SUMS` file, unpack it, and put `frg` on your `PATH`.
+
+| Platform | Archive |
+|----------|---------|
+| macOS Apple silicon | `frg-macos-aarch64.tar.gz` |
+| Linux x86_64 | `frg-linux-x86_64.tar.gz` |
+| Linux aarch64 | `frg-linux-aarch64.tar.gz` |
+| Windows x86_64 | `frg-windows-x86_64.zip` |
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+tar -xzf frg-macos-aarch64.tar.gz
+```
+
+### From source
+
+Building from source needs Rust, from [rustup.rs](https://rustup.rs). On macOS it
+also needs Apple's command line developer tools; the first `git` command offers
+to install them.
+
 ```sh
 git clone https://github.com/ferrosadb/forge.git
 cd forge
 cargo install --path crates/cli --locked
 ```
+
+### Connect your agent
 
 Add to `~/.claude/settings.json` to expose the MCP server:
 
@@ -41,16 +74,31 @@ Add to `~/.claude/settings.json` to expose the MCP server:
 }
 ```
 
-Install Claude Code hooks (pre-tool-call output filtering):
+Install the Claude Code hooks, which suggest `frg digest` or `frg excerpt` before
+Claude reads a very large file:
 
 ```sh
 frg init --global
 ```
 
-Use `frg init --show` to inspect the installed hook and `frg init --global --uninstall`
-to remove it. The Goose integration is a repository-local skill at
-[`integrations/goose/forge`](integrations/goose/forge). Configure that directory
-through the Goose host's normal extension or skill-discovery settings.
+Use `frg init --global --show` to inspect the installed hooks and
+`frg init --global --uninstall` to remove them. The Goose integration is a
+repository-local skill at [`integrations/goose/forge`](integrations/goose/forge).
+Configure that directory through the Goose host's normal extension or
+skill-discovery settings.
+
+### Uninstall
+
+1. Remove the hooks with `frg init --global --uninstall`, and with
+   `frg init --uninstall` in any project where you ran `frg init`.
+2. Delete the `forge` entry from the `mcpServers` block you added. Removing the
+   hooks leaves it in place.
+3. Remove the binary with `brew uninstall ferrosadb/tap/forge` or
+   `cargo uninstall forge`, or delete the `frg` you downloaded.
+4. Optionally delete Forge's local data: `~/Library/Application Support/forge`
+   on macOS, which holds run history and saved raw output, and any `.forge/`
+   folders in your projects, which hold checklists, sheet mappings and project
+   settings.
 
 ---
 
@@ -58,8 +106,7 @@ through the Goose host's normal extension or skill-discovery settings.
 
 Commands that produce structured reports write JSON to stdout unless noted;
 commands with an explicit text format, such as `glob --format brief`, are the
-exception. Pass output through `frg hook` in hooks to filter before Claude
-reads it.
+exception.
 
 ### Log and text processing
 
@@ -86,7 +133,7 @@ reads it.
 | `frg materialization-scan <paths...> [--include-tests] [--max-findings N]` | Find likely unbounded materialization in disk/storage/query I/O paths (Rust + Go): whole-file reads (`read_to_string`/`io.ReadAll`/`os.ReadFile`), query result materialization (`rows_or_empty`/`ALLOW FILTERING` / `for rows.Next()` / `cursor.All`), `collect()` / `slices.Collect`, growing `Vec`/slice via `append`, and map-of-`Vec` / `map[K][]V` grouping |
 | `frg todo-extract [paths...]` | Extract TODO/FIXME/HACK comments with git blame attribution and age |
 | `frg secret-scan [path]` | Find leaked API keys, credentials, private keys, and tokens |
-| `frg deps-audit [path] [--min-severity LEVEL]` | Audit dependency lockfiles (Cargo.lock, package-lock.json, etc.) for known CVEs |
+| `frg deps-audit [path] [--min-severity LEVEL]` | Audit dependency lockfiles (Cargo.lock, package-lock.json, etc.) against a built-in, offline list of known-bad versions (supply-chain attacks, critical CVEs, yanked packages) |
 
 ### Architecture and dependencies
 
@@ -95,8 +142,8 @@ reads it.
 | `frg dsm extract\|analyze [dir]` | Design Structure Matrix: `extract` returns raw dependency edges; `analyze` runs the full pipeline with cycle detection, cluster identification, metrics, and refactoring suggestions. `--with-cognitive` additionally ranks cognitive complexity hot spots and folds them into the suggestions |
 | `frg dsm dead-code [dir]` | Find unreachable declarations via BFS from entry points; `--min-confidence definite\|possible\|all`, `--include-tests`, `--exclude <glob>` (repeatable), skips generated files and `#[cfg(test)]` items |
 | `frg dep-tree [dir]` | Build per-module dependency map showing import fan-in and fan-out |
-| `frg api-diff` | Diff public API surface between two refs; detect breaking changes |
-| `frg schema-diff` | Diff SQL/CQL/Cypher schemas between two files or refs for breaking migration detection |
+| `frg api-diff` | Diff the public API surface between two files or folders; detect breaking changes |
+| `frg schema-diff` | Diff SQL/CQL/Cypher schemas between two files for breaking migration detection |
 | `frg merge-check` | Test branch merge-ability without side effects |
 
 ### Code discovery and structure
@@ -191,19 +238,22 @@ Two-way sync between a Google Sheet of bugs and the CQL task board. See [Google 
 
 ### Language-specific toolchain wrappers
 
-Each wrapper parses native output into structured JSON with error locations, warning counts, and an actionable `hint` field on failure.
+These are the stack-detected MCP tools (tier 2). Each parses native output into
+structured JSON with error locations, warning counts, and an actionable `hint`
+field on failure. An agent passes the values below as the tool's `command`
+argument. From a shell, run the toolchain's own command through `frg run`, for
+example `frg run cargo fmt --check`.
 
-| Command | Subcommands |
-|---------|-------------|
-| `frg run cargo <cmd>` | `build`, `check`, `test`, `clippy`, `fmt_check` |
-| `frg run go <cmd>` | `build`, `test`, `vet`, `fmt_check`, `mod_tidy` |
-| `frg run dotnet <cmd>` | `build`, `test`, `format_check` |
-| `frg run npm <cmd>` | `test`, `typecheck`, `lint`, `format_check`, `deps`, `build`, `audit` |
-| `frg run python <cmd>` | `test`, `lint`, `format_check`, `deps`, `typecheck` |
-| `frg run mix <cmd>` | `compile`, `test`, `format_check`, `deps` |
+| MCP tool | `command` values |
+|----------|------------------|
+| `cargo` | `build`, `check`, `test`, `clippy`, `fmt_check` |
+| `go_tools` | `build`, `test`, `vet`, `fmt_check`, `mod_tidy` |
+| `dotnet` | `build`, `test`, `format_check` |
+| `npm_tools` | `test`, `typecheck`, `lint`, `format_check`, `deps`, `build`, `audit` |
+| `python_tools` | `test`, `lint`, `format_check`, `deps`, `typecheck` |
+| `mix_compile`, `mix_test`, `mix_format_check`, `mix_deps` | One tool per command, with no `command` argument |
 
-Every `frg run` invocation — the wrappers above and the generic
-`frg run [--tee] [--list-filters] -- <cmd>` passthrough — ends with exactly one
+Every `frg run [--tee] [--list-filters] -- <cmd>` invocation ends with exactly one
 status line on stderr, independent of the (sometimes empty) filtered stdout:
 
 ```
@@ -226,7 +276,7 @@ separate line when `--tee` saved the raw output on failure. Set
 | `frg clear-analytics` | Reset analytics counters |
 | `frg discover [dir]` | Scan project and suggest forge optimization opportunities |
 | `frg init --global [--uninstall\|--show]` | Install, remove, or inspect the Claude Code hook configuration |
-| `frg hook` | Process tool output as a Claude Code hook (reads tool name + output from env) |
+| `frg hook` | Claude Code hook handler: reads the hook event as JSON on standard input, and before a `Read` of a very large file suggests `frg digest` or `frg excerpt` |
 | `frg context [--session ID] [--clear]` | Show or clear tracked files and symbols for an agent session |
 | `frg context-check [dir]` | Report available ferrosa-memory context for a project |
 | `frg tool-aliases [--format FORMAT]` | Return the alias map for tool name mismatches between callers and forge |
@@ -238,7 +288,7 @@ separate line when `--tee` saved the raw output on failure. Set
 
 The MCP server exposes Forge's agent-facing functionality directly to MCP clients. Use `frg --mcp` for stdio clients, or run `frg --mcp-http --mcp-http-addr 127.0.0.1:9977` to expose a Streamable HTTP endpoint at `POST /mcp`.
 
-Forge supports the draft `2026-07-28` MCP discovery/result shape: `server/discover`, `resultType: "complete"`, server identity in result `_meta`, `outputSchema` on advertised tools, and cache metadata on `tools/list`. The HTTP endpoint requires the draft mirror headers (`MCP-Protocol-Version`, `Mcp-Method`, and Base64-safe `Mcp-Name` for `tools/call`), validates `Origin`, returns `405` for legacy GET/DELETE MCP endpoint traffic, and rejects client JSON-RPC response objects.
+Forge supports the draft `2026-07-28` MCP discovery/result shape: `server/discover`, `resultType: "complete"`, server identity in result `_meta`, `outputSchema` on advertised tools, and cache metadata on `tools/list`. The HTTP endpoint requires the draft mirror headers (`MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` for `tools/call`, holding the tool name either plain or wrapped as `=?base64?<Base64 of the name>?=`), requires `params._meta` on every request to carry `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities`, validates `Origin`, returns `405` for legacy GET/DELETE MCP endpoint traffic, and rejects client JSON-RPC response objects.
 
 Tools are split into two tiers:
 
@@ -263,6 +313,7 @@ Tools are split into two tiers:
 | `list` | list all available forge tools |
 | `tool_aliases` | `frg tool-aliases` |
 | `version` | `frg --version` |
+| `mcp_probe` | `frg mcp-probe` |
 | `test_summary` | `frg test-summary` |
 | `log_distill` | `frg log-distill` |
 | `diff_filter` | `frg diff-filter` |
@@ -336,8 +387,8 @@ loop over them.
    ones `push` may ever write), a `status_map` (sheet status → task status), and
    the `dev_writable_status` / `terminal_status` sets that drive the write-back
    handoff. Top-level array keys must appear **before** the `[columns]` /
-   `[status_map]` tables (a TOML rule). `.forge/` is git-ignored, so your real
-   ids and mappings stay local.
+   `[status_map]` tables (a TOML rule). Add `.forge/` to your project's
+   `.gitignore` to keep your real ids and mappings out of the repository.
 4. **Authorize once** — opens a browser consent page and caches a refresh token
    under `~/.config/forge/sheet-sync/` (stored `0600`, never logged):
    ```sh
@@ -400,7 +451,7 @@ board is the CQL store (`FORGE_CQL_HOST`, same as `frg task`).
 - Generic web URLs
 - **Local PDF files** (full structured extraction)
 
-For local PDFs, the pipeline does structured extraction — not simple `pdftotext`. It is comparable in intent to [Docling](https://github.com/DS4SD/docling):
+For local PDFs, the pipeline does structured extraction, comparable in intent to [Docling](https://github.com/DS4SD/docling). It needs the `pdftotext` command from Poppler on your `PATH` (`brew install poppler` on macOS); without it, `ingest-paper` stops with an error.
 
 ### What it extracts
 
