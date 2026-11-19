@@ -389,7 +389,7 @@ fn post_token_request(
 /// rather than swallow it.
 fn generate_state() -> anyhow::Result<String> {
     let mut buf = [0u8; 16];
-    getrandom::getrandom(&mut buf)
+    getrandom::fill(&mut buf)
         .map_err(|e| anyhow::anyhow!("oauth: failed to generate CSRF state nonce: {e}"))?;
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }

@@ -44,6 +44,6 @@ clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
 jiff = { version = "0.2", features = ["serde"] }
 rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
-dirs = "5"
+dirs = "7"
 toml = "0.8"
 tempfile = "3"

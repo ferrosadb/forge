@@ -10,4 +10,4 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
 ureq = { version = "3", features = ["json", "platform-verifier"] }
-base64 = "0.22"
+base64 = { version = "0.23", default-features = false, features = ["std"] }
