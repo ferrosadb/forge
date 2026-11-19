@@ -61,6 +61,6 @@ allow-git = [
     # forge-tasks' CQL driver: the ferrosadb/scylla-rust-driver
     # `ferrosa/1.6.0-no-chrono` branch, pinned by rev in crates/tasks/Cargo.toml.
     # Every upstream scylla release requires chrono, which RUSTSEC-2026-0543
-    # marks unmaintained. ferrosa pins the same commit.
+    # marks unmaintained. ferrosa pins the same fork.
     "https://github.com/ferrosadb/scylla-rust-driver.git",
 ]

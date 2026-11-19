@@ -11,7 +11,9 @@ anyhow = { workspace = true }
 dirs = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 # ferrosadb/scylla-rust-driver `ferrosa/1.6.0-no-chrono`: driver 1.6.0 with
-# chrono removed (RUSTSEC-2026-0543); the same commit ferrosa pins.
-scylla = { git = "https://github.com/ferrosadb/scylla-rust-driver.git", rev = "05460867" }
+# chrono removed (RUSTSEC-2026-0543), plus socket2 0.6, rand 0.10 and
+# hashbrown 0.17 so forge carries one copy of each. ferrosa pins the parent
+# commit, 05460867.
+scylla = { git = "https://github.com/ferrosadb/scylla-rust-driver.git", rev = "e5f28586" }
 tokio = { version = "1", features = ["rt"] }
 toml = { workspace = true }

@@ -20,7 +20,7 @@ which = "7"
 ureq = { version = "3", features = ["json"] }
 walkdir = "2"
 serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 thiserror = "2"
 jiff = { workspace = true }

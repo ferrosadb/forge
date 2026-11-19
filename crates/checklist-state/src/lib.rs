@@ -1289,9 +1289,15 @@ fn canonical_gate_state(gate: &WaitingGate) -> CanonicalGateState {
 }
 
 fn sha256_json<T: Serialize>(value: &T) -> Result<String> {
+    use std::fmt::Write as _;
     let encoded = serde_json::to_vec(value).context("failed to serialize attempt fingerprint")?;
     let digest = Sha256::digest(encoded);
-    Ok(format!("sha256:{digest:x}"))
+    let mut out = String::with_capacity("sha256:".len() + 2 * digest.len());
+    out.push_str("sha256:");
+    for byte in digest.iter() {
+        write!(out, "{byte:02x}").context("failed to format attempt fingerprint")?;
+    }
+    Ok(out)
 }
 
 fn canonical_execution_fingerprint(
@@ -4111,6 +4117,17 @@ mod tests {
         assert_eq!(
             self_gated.items[0].gate.as_ref().unwrap().kind,
             GateKind::LoopDetected
+        );
+    }
+
+    /// Attempt fingerprints are saved in checklist files and compared on the
+    /// next attempt, so their text must not change with the sha2 version.
+    #[test]
+    fn sha256_json_fingerprint_text_is_stable() {
+        // SHA-256 of the JSON encoding `"abc"`, quotes included.
+        assert_eq!(
+            sha256_json(&"abc").unwrap(),
+            "sha256:6cc43f858fbb763301637b5af970e2a46b46f461f27e5a0f41e009c59b827b25"
         );
     }
 
