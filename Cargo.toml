@@ -42,7 +42,7 @@ regex = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
-chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "0.2", features = ["serde"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 dirs = "5"
 toml = "0.8"

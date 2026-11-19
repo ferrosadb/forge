@@ -10,7 +10,8 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
-scylla = "0.15"
+# ferrosadb/scylla-rust-driver `ferrosa/1.6.0-no-chrono`: driver 1.6.0 with
+# chrono removed (RUSTSEC-2026-0543); the same commit ferrosa pins.
+scylla = { git = "https://github.com/ferrosadb/scylla-rust-driver.git", rev = "05460867" }
 tokio = { version = "1", features = ["rt"] }
-chrono = { workspace = true }
 toml = { workspace = true }

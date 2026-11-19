@@ -49,6 +49,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   elements) that sit inside a cognitively dense element — the combination that
   makes a refactor high-value rather than merely tidy.
 
+### Changed
+
+- **chrono is gone from the dependency graph (RUSTSEC-2026-0543).** Every
+  chrono release is marked unmaintained, so `cargo deny check` failed with no
+  version to upgrade to. Forge's own timestamps now use `jiff`; checklist files
+  keep the same RFC 3339 text, so files written by older builds load and older
+  builds can read new ones. The task board (`forge-tasks`) moves from scylla
+  0.15 to the ferrosadb/scylla-rust-driver `ferrosa/1.6.0-no-chrono` branch,
+  the commit ferrosa pins.
+- **Board health counts a node as up only while the driver holds a connection
+  to it.** Driver 1.x removed `Node::is_down()`, which followed the cluster's
+  node up/down events; `is_connected()` reads the driver's own connection pool.
+- **`frg todo-extract` leaves a line's age unknown when git reports an author
+  time outside years -9999..=9999.** It used to report that line as zero days
+  old.
+
 ### Fixed
 
 - **A `c"..."` C-string literal no longer kills a whole scan.** `syn` 1 panics

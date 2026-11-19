@@ -23,6 +23,6 @@ serde-saphyr = { version = "2", default-features = false, features = ["deseriali
 sha2 = "0.10"
 hex = "0.4"
 thiserror = "1"
-chrono = { workspace = true }
+jiff = { workspace = true }
 url = "2"
 fs2 = "0.4"
