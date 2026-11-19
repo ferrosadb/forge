@@ -564,10 +564,7 @@ fn passes_contextual_filter(rule: &Rule, lines: &[&str], idx: usize) -> bool {
             // belt-and-suspenders: if the full line contains `safe_load`
             // and doesn't contain `pickle.loads`, treat it as safe.
             let line = lines[idx];
-            if line.contains("safe_load") && !line.contains("pickle.loads") {
-                return false;
-            }
-            true
+            !(line.contains("safe_load") && !line.contains("pickle.loads"))
         }
         _ => true,
     }

@@ -39,12 +39,23 @@ struct LintEntry {
 fn parse_entries(input: &str) -> Vec<LintEntry> {
     let mut entries = Vec::new();
 
-    // Clippy: warning: unused variable `x` --> src/main.rs:10:5
+    // Clippy / rustc: a headline, then an optional location line.
+    //   warning: unused variable: `x`
+    //    --> src/main.rs:10:5
     // Also matches: error[E0308]: mismatched types --> src/lib.rs:5:1
+    // `(.+)$` keeps the whole headline. A lazy `(.+?)` in front of the
+    // optional location matched one character, so every message came back as
+    // a single letter and every file as "unknown".
     let clippy_re = Regex::new(
-        r"(?m)^(warning|error)(?:\[([A-Za-z0-9_:]+)\])?: (.+?)(?:\n\s*--> (.+?):\d+:\d+)?",
+        r"(?m)^(warning|error)(?:\[([A-Za-z0-9_:]+)\])?: (.+)$(?:\n\s*--> (.+?):\d+:\d+)?",
     )
     .unwrap();
+    // A lint's name sits in a note further down its diagnostic:
+    //   = note: `#[warn(clippy::needless_return)]` on by default
+    let lint_name_re = Regex::new(r"#\[(?:warn|deny|forbid)\(([A-Za-z0-9_:]+)\)\]").unwrap();
+    // Cargo's closing tally repeats the count instead of reporting a finding:
+    //   warning: `demo` (lib) generated 2 warnings
+    let tally_re = Regex::new(r"^`[^`]+` \([^)]*\) generated \d+ warnings?").unwrap();
 
     // Ruff/pylint: src/main.py:10:5: E501 Line too long
     let ruff_re = Regex::new(r"(?m)^(.+?):(\d+):(?:\d+:)?\s*([A-Z]\d{3,4})\s+(.+)$").unwrap();
@@ -54,12 +65,25 @@ fn parse_entries(input: &str) -> Vec<LintEntry> {
         Regex::new(r"(?m)^\s+\d+:\d+\s+(error|warning)\s+(.+?)\s{2,}([\w/-]+)\s*$").unwrap();
 
     // Try clippy format
-    for cap in clippy_re.captures_iter(input) {
+    let headlines: Vec<_> = clippy_re.captures_iter(input).collect();
+    for (i, cap) in headlines.iter().enumerate() {
         let severity = cap[1].to_string();
+        let message = cap[3].trim().to_string();
+        if tally_re.is_match(&message) {
+            continue;
+        }
+        // The diagnostic runs from this headline to the next one.
+        let whole = cap.get(0).expect("group 0 always matches");
+        let block_end = headlines
+            .get(i + 1)
+            .and_then(|next| next.get(0))
+            .map_or(input.len(), |next| next.start());
+        let block = &input[whole.end()..block_end];
         let rule = cap
             .get(2)
-            .map_or_else(|| "unknown".to_string(), |m| m.as_str().to_string());
-        let message = cap[3].trim().to_string();
+            .map(|m| m.as_str().to_string())
+            .or_else(|| lint_name_re.captures(block).map(|c| c[1].to_string()))
+            .unwrap_or_else(|| "unknown".to_string());
         let file = cap
             .get(4)
             .map_or_else(|| "unknown".to_string(), |m| m.as_str().to_string());
@@ -241,5 +265,57 @@ error[E0308]: mismatched types
         assert_eq!(result.total, 3);
         let sum: usize = result.groups.iter().map(|g| g.count).sum();
         assert_eq!(sum, 3);
+    }
+
+    // Real `cargo clippy` output (rustc and clippy 1.99.1) for two warnings:
+    // a rustc lint and a Clippy lint, followed by Cargo's closing tally.
+    const CLIPPY_TWO_WARNINGS: &str = r#"    Checking demo v0.1.0 (/Users/admin/qa/demo)
+warning: unused variable: `x`
+ --> src/lib.rs:6:9
+  |
+6 |     let x = 5;
+  |         ^ help: if this is intentional, prefix it with an underscore: `_x`
+  |
+  = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unneeded `return` statement
+ --> src/lib.rs:2:5
+  |
+2 |     return a + b;
+  |     ^^^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_return
+  = note: `#[warn(clippy::needless_return)]` on by default
+help: remove `return`
+  |
+2 -     return a + b;
+2 +     a + b
+  |
+
+warning: `demo` (lib) generated 2 warnings (run `cargo clippy --fix --lib -p demo -- ` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.29s
+"#;
+
+    #[test]
+    fn clippy_output_keeps_message_file_and_lint_name() {
+        let result = dedup(CLIPPY_TWO_WARNINGS);
+        // Two findings: Cargo's closing "generated 2 warnings" line is not one.
+        assert_eq!(result.total, 2);
+
+        let unused = result
+            .groups
+            .iter()
+            .find(|g| g.rule == "unused_variables")
+            .expect("unused_variables group");
+        assert_eq!(unused.message, "unused variable: `x`");
+        assert_eq!(unused.files, vec!["src/lib.rs"]);
+
+        let needless = result
+            .groups
+            .iter()
+            .find(|g| g.rule == "clippy::needless_return")
+            .expect("clippy::needless_return group");
+        assert_eq!(needless.message, "unneeded `return` statement");
+        assert_eq!(needless.files, vec!["src/lib.rs"]);
     }
 }
