@@ -26,7 +26,7 @@ const CANONICAL_HOOK_COMMAND: &str = "frg hook 2>/dev/null || true";
 const HOOK_SCHEMA_VERSION: &str = "1";
 
 #[derive(Parser)]
-#[command(name = "frg", version, about = "Token-saving tools for Claude Code")]
+#[command(name = "frg", version, about = "Token-saving tools for coding agents")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -245,7 +245,7 @@ enum Commands {
     /// Clear all analytics data (filter_log and command_log)
     ClearAnalytics,
 
-    /// Install/uninstall Claude Code hooks for automatic command rewriting
+    /// Install/uninstall Claude Code hooks
     Init {
         /// Install hooks globally (~/.claude/settings.json)
         #[arg(short, long)]
