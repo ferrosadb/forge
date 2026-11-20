@@ -66,7 +66,7 @@ Case-insensitive, but the token itself must be uppercase (`todo` in prose doesn'
 - `ignore` (walk + gitignore)
 - `regex`
 - `std::process::Command` for `git blame` (shell out, no git2 crate)
-- `chrono` (age computation)
+- `jiff` (age computation)
 - `forge-shared`
 
 ## Test plan

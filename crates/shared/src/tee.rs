@@ -34,7 +34,7 @@ pub fn save_raw_output(command: &str, output: &str) -> Result<PathBuf> {
         .take(50)
         .collect();
 
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let timestamp = jiff::Timestamp::now().strftime("%Y%m%d_%H%M%S");
     let filename = format!("{}_{}.log", timestamp, safe_cmd);
     let path = dir.join(&filename);
 

@@ -10,7 +10,7 @@ serde_json = { workspace = true }
 regex = { workspace = true }
 anyhow = { workspace = true }
 ignore = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

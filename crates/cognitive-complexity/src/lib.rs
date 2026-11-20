@@ -29,6 +29,7 @@
 pub mod churn;
 mod engine;
 mod report;
+mod score;
 
 pub use churn::{churn_factor, rank_files, ChurnConfig, ChurnMap, FileHotspot};
 
@@ -420,36 +421,24 @@ mod tests {
         assert_eq!(report.max_cognitive, 0);
     }
 
-    /// syn 1 panics (rather than erroring) on C-string literals, which are
-    /// valid since Rust 1.77 and appear in real code. An uncaught panic would
-    /// abort the whole scan and produce no report at all — this is the
-    /// regression that killed a full-repository scan.
+    /// C-string literals are valid since Rust 1.77. syn 1 panicked on them,
+    /// which once killed a full-repository scan; the syn 2 scorer reads them.
     #[test]
-    fn c_string_literal_is_a_disclosed_failure_not_a_dead_process() {
-        let source = "fn with_cstr() -> &'static std::ffi::CStr {\n    c\"hello\"\n}\n";
+    fn a_c_string_literal_file_is_scored() {
+        let source = "fn with_cstr(ok: bool) -> &'static std::ffi::CStr {\n    if ok { c\"hello\" } else { c\"no\" }\n}\n";
         let report = analyze(source, &CognitiveConfig::default());
-        assert_eq!(report.files_scanned, 1);
-        assert_eq!(report.files_analyzed, 0, "the file cannot be scored");
-        assert_eq!(report.failures.len(), 1, "the failure is disclosed");
-        assert_eq!(report.failures[0].kind, FailureKind::Parse);
-        assert!(
-            report.failures[0].detail.contains("panicked"),
-            "the panic is explained: {}",
-            report.failures[0].detail
-        );
+        assert_eq!(report.files_analyzed, 1);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.functions[0].cognitive, 2, "if +1, else +1");
     }
 
-    /// The panic must be contained per file: every other file still scores.
+    /// A file that does not parse is disclosed, and every other file still scores.
     #[test]
-    fn a_c_string_file_does_not_take_down_the_scan() {
+    fn an_unparsable_file_does_not_take_down_the_scan() {
         let dir = tempfile::tempdir().unwrap();
         // Sorted order puts the bad file first, so containment is proven even
         // when the panic happens early in the walk.
-        std::fs::write(
-            dir.path().join("a_bad.rs"),
-            "fn with_cstr() -> &'static std::ffi::CStr {\n    c\"boom\"\n}\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("a_bad.rs"), "fn broken( {\n").unwrap();
         std::fs::write(
             dir.path().join("b_good.rs"),
             "fn gnarly(xs: &[u32]) -> u32 {\n    let mut t = 0;\n    for x in xs {\n        if *x > 0 {\n            for y in 0..*x {\n                if y > 0 { t += y; }\n            }\n        }\n    }\n    t\n}\n",

@@ -7,9 +7,9 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 anyhow = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = { workspace = true }

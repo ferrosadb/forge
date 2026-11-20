@@ -9,7 +9,6 @@
 //! `code-audit`, `complexity-audit`, and `refactor` skills.
 
 use anyhow::Result;
-use chrono::{TimeZone, Utc};
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde::Serialize;
@@ -342,11 +341,11 @@ fn blame_line(file: &Path, line: usize) -> Option<(Option<String>, Option<String
         }
     }
 
-    let age_days = author_time.map(|ts| {
-        let then = Utc.timestamp_opt(ts, 0).single().unwrap_or_else(Utc::now);
-        let now = Utc::now();
-        (now - then).num_days()
-    });
+    // An author-time jiff cannot represent leaves the age unknown; chrono's
+    // version silently reported such a line as zero days old.
+    let age_days = author_time
+        .and_then(|ts| jiff::Timestamp::from_second(ts).ok())
+        .map(|then| jiff::Timestamp::now().duration_since(then).as_secs() / 86_400);
 
     Some((author_mail, commit, age_days))
 }

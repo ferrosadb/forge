@@ -1,6 +1,6 @@
 //! `TaskStore` — synchronous wrapper around the async scylla driver.
 //!
-//! Each `TaskStore` owns a single-thread tokio runtime and a `scylla::Session`.
+//! Each `TaskStore` owns a single-thread tokio runtime and a scylla `Session`.
 //! All public methods are synchronous; they drive the async session via
 //! `rt.block_on(...)`.
 //!
@@ -8,11 +8,13 @@
 //! ferrosa PREPARE bug.  Single-quote characters in text values are escaped by
 //! doubling them.
 
-#![allow(deprecated)] // scylla 0.15: into_legacy_result / rows_or_empty are deprecated but functional
-
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
+use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
+use scylla::response::query_result::QueryResult;
+use scylla::value::{CqlValue, Row};
 use uuid::Uuid;
 
 use crate::schema::{
@@ -124,7 +126,7 @@ macro_rules! cql_exec {
 
 pub struct TaskStore {
     rt: tokio::runtime::Runtime,
-    session: Arc<scylla::Session>,
+    session: Arc<Session>,
     tenant_id: String,
 }
 
@@ -191,9 +193,9 @@ impl TaskStore {
         // variable, the project config or the global config may each have
         // supplied it.
         let contacted = hosts.join(", ");
-        let session: scylla::Session = rt
+        let session: Session = rt
             .block_on(async {
-                scylla::SessionBuilder::new()
+                SessionBuilder::new()
                     .known_nodes(&hosts)
                     .user("ferrosa_admin", "ferrosa_admin")
                     .build()
@@ -227,15 +229,17 @@ impl TaskStore {
     /// The driver's live view of the board cluster, derived from the topology it
     /// discovered via `system.peers` (the advertised client addresses, so this is
     /// NAT/Docker-correct): how many nodes are known and how many are up.
-    /// `Node::is_down()` is the driver's own liveness marker — the same topology
-    /// it routes queries over, so it can't disagree with reality.
+    /// A node counts as up when the driver holds an open connection to it
+    /// (`Node::is_connected()`) — the same pools it routes queries over, so it
+    /// can't disagree with reality. Driver 1.x removed 0.15's `is_down()`, which
+    /// followed the cluster's node up/down events instead.
     pub fn board_health(&self) -> crate::debug_stop::BoardHealth {
-        let cluster = self.session.get_cluster_data();
+        let cluster = self.session.get_cluster_state();
         let nodes = cluster.get_nodes_info();
         let nodes_total = nodes.len();
         let nodes_up = nodes
             .iter()
-            .filter(|n| n.is_enabled() && !n.is_down())
+            .filter(|n| n.is_enabled() && n.is_connected())
             .count();
         crate::debug_stop::BoardHealth {
             nodes_up,
@@ -253,16 +257,12 @@ impl TaskStore {
             "SELECT table_name FROM system_schema.tables WHERE keyspace_name = '{BOARD_KEYSPACE}'"
         );
         let result = cql_exec!(self.rt, &self.session, cql)
-            .context("ensure_schema: read system_schema.tables")?
-            .into_legacy_result()
-            .context("ensure_schema: legacy result")?;
-        let rows = result
-            .rows()
-            .context("ensure_schema: expected system_schema.tables rows")?;
+            .context("ensure_schema: read system_schema.tables")?;
+        let rows =
+            select_rows(result).context("ensure_schema: expected system_schema.tables rows")?;
         let mut present = Vec::new();
         for row in rows {
-            let (name,): (String,) = row
-                .into_typed()
+            let name = col_str(row.columns.into_iter().next(), "column 0")
                 .context("ensure_schema: parse system_schema.tables row")?;
             present.push(name);
         }
@@ -276,15 +276,11 @@ impl TaskStore {
              '{BOARD_KEYSPACE}' AND table_name = 'tasks'"
         );
         let result = cql_exec!(self.rt, &self.session, cql)
-            .context("ensure_schema: read system_schema.columns")?
-            .into_legacy_result()
-            .context("ensure_schema: legacy result")?;
-        let rows = result
-            .rows()
-            .context("ensure_schema: expected system_schema.columns rows")?;
+            .context("ensure_schema: read system_schema.columns")?;
+        let rows =
+            select_rows(result).context("ensure_schema: expected system_schema.columns rows")?;
         for row in rows {
-            let (name,): (String,) = row
-                .into_typed()
+            let name = col_str(row.columns.into_iter().next(), "column 0")
                 .context("ensure_schema: parse system_schema.columns row")?;
             if name == column {
                 return Ok(true);
@@ -513,19 +509,17 @@ impl TaskStore {
             tid = esc(task_id),
         );
 
-        let links_result = cql_exec!(self.rt, &self.session, links_cql)
-            .context("get_task: fetch links")?
-            .into_legacy_result()
-            .context("get_task: legacy result")?;
+        let links_result =
+            cql_exec!(self.rt, &self.session, links_cql).context("get_task: fetch links")?;
 
         let mut parents = Vec::new();
         let mut children = Vec::new();
-        let link_rows = links_result
-            .rows()
-            .context("get_task: expected link rows")?;
+        let link_rows = select_rows(links_result).context("get_task: expected link rows")?;
         for row in link_rows {
-            let (_, link_type, dst): (String, String, String) =
-                row.into_typed().context("get_task: parse link row")?;
+            let mut cols = row.columns.into_iter();
+            let _src = col_str(cols.next(), "task_links.src_task_id")?;
+            let link_type = col_str(cols.next(), "task_links.link_type")?;
+            let dst = col_str(cols.next(), "task_links.dst_task_id")?;
             if link_type == "parent" {
                 parents.push(crate::types::TaskLink {
                     link_type: link_type.clone(),
@@ -548,16 +542,13 @@ impl TaskStore {
             tid = esc(task_id),
         );
 
-        let comments_result = cql_exec!(self.rt, &self.session, comments_cql)
-            .context("get_task: fetch comments")?
-            .into_legacy_result()
-            .context("get_task: comments legacy result")?;
+        let comments_result =
+            cql_exec!(self.rt, &self.session, comments_cql).context("get_task: fetch comments")?;
 
         let mut recent_comments = Vec::new();
         let mut comment_seq: u32 = 0;
-        let comment_rows = comments_result
-            .rows()
-            .context("get_task: expected comment rows")?;
+        let comment_rows =
+            select_rows(comments_result).context("get_task: expected comment rows")?;
         for row in comment_rows {
             // A comment whose columns do not decode is schema drift, not an
             // empty comment: blanking the author and body used to publish a
@@ -614,12 +605,9 @@ impl TaskStore {
             where_clause, MAX_FETCH_ROWS
         );
 
-        let result = cql_exec!(self.rt, &self.session, cql)
-            .context("list_tasks SELECT")?
-            .into_legacy_result()
-            .context("list_tasks: legacy result")?;
+        let result = cql_exec!(self.rt, &self.session, cql).context("list_tasks SELECT")?;
 
-        let rows = result.rows().context("list_tasks: expected rows")?;
+        let rows = select_rows(result).context("list_tasks: expected rows")?;
         let mut tasks = parse_task_rows(rows).context("list_tasks: parse rows")?;
         sort_newest_first(&mut tasks);
         tasks.truncate(limit);
@@ -756,22 +744,16 @@ impl TaskStore {
 
     /// Every comment id of `task_id` (not just the recent ten `find_task` shows).
     fn comment_ids(&self, task_id: &str) -> Result<Vec<uuid::Uuid>> {
-        use scylla::frame::response::result::CqlValue;
         let cql = format!(
             "SELECT comment_id FROM agent_memory.task_comments \
              WHERE tenant_id={tenant} AND task_id='{tid}'",
             tenant = self.tenant_id,
             tid = esc(task_id),
         );
-        let result = cql_exec!(self.rt, &self.session, cql)
-            .context("delete_task: fetch comment ids")?
-            .into_legacy_result()
-            .context("delete_task: comment ids legacy result")?;
+        let result =
+            cql_exec!(self.rt, &self.session, cql).context("delete_task: fetch comment ids")?;
         let mut ids = Vec::new();
-        for row in result
-            .rows()
-            .context("delete_task: expected comment id rows")?
-        {
+        for row in select_rows(result).context("delete_task: expected comment id rows")? {
             match row.columns.into_iter().next().flatten() {
                 Some(CqlValue::Timeuuid(t)) => ids.push(uuid::Uuid::from(t)),
                 Some(CqlValue::Uuid(u)) => ids.push(u),
@@ -818,12 +800,9 @@ impl TaskStore {
             limit = MAX_FETCH_ROWS,
         );
 
-        let result = cql_exec!(self.rt, &self.session, cql)
-            .context("board SELECT")?
-            .into_legacy_result()
-            .context("board: legacy result")?;
+        let result = cql_exec!(self.rt, &self.session, cql).context("board SELECT")?;
 
-        let rows = result.rows().context("board: expected rows")?;
+        let rows = select_rows(result).context("board: expected rows")?;
         let tasks = parse_task_rows(rows).context("board: parse rows")?;
 
         let mut draft = Vec::new();
@@ -887,12 +866,9 @@ impl TaskStore {
             tid = esc(task_id),
         );
 
-        let result = cql_exec!(self.rt, &self.session, cql)
-            .context("fetch_task_row SELECT")?
-            .into_legacy_result()
-            .context("fetch_task_row: legacy result")?;
+        let result = cql_exec!(self.rt, &self.session, cql).context("fetch_task_row SELECT")?;
 
-        let rows = result.rows().context("fetch_task_row: expected rows")?;
+        let rows = select_rows(result).context("fetch_task_row: expected rows")?;
         match rows.into_iter().next() {
             None => Ok(None),
             Some(row) => parse_task_row(row)
@@ -906,6 +882,20 @@ impl TaskStore {
 // Row parsing
 // ---------------------------------------------------------------------------
 
+/// Every row of a SELECT result, decoded column by column.
+///
+/// Fails when the statement returned no rows result or a row does not decode,
+/// rather than reading as an empty table.
+fn select_rows(result: QueryResult) -> Result<Vec<Row>> {
+    let rows = result
+        .into_rows_result()
+        .context("the statement returned no rows result")?;
+    rows.rows::<Row>()
+        .context("rows result metadata")?
+        .collect::<Result<Vec<Row>, _>>()
+        .context("decode row")
+}
+
 /// Parse every row of a board read, or fail the whole read.
 ///
 /// Dropping the rows that would not parse (`if let Ok(task) = ...`) meant a
@@ -913,7 +903,7 @@ impl TaskStore {
 /// error and no count to compare against. That is the same failure as an empty
 /// answer from a dead host, one row at a time: the caller cannot tell "this task
 /// does not exist" from "I could not decode it".
-fn parse_task_rows(rows: Vec<scylla::frame::response::result::Row>) -> Result<Vec<Task>> {
+fn parse_task_rows(rows: Vec<Row>) -> Result<Vec<Task>> {
     rows.into_iter()
         .enumerate()
         .map(|(i, row)| parse_task_row(row).with_context(|| format!("row {i}")))
@@ -927,7 +917,7 @@ fn parse_task_rows(rows: Vec<scylla::frame::response::result::Row>) -> Result<Ve
 /// Strict on purpose. A NULL in a nullable column is *data* and gets the
 /// documented default; a column that is missing or of the wrong CQL type is
 /// schema drift, and is an error rather than a plausible-looking task.
-fn parse_task_row(row: scylla::frame::response::result::Row) -> Result<Task> {
+fn parse_task_row(row: Row) -> Result<Task> {
     let mut cols = row.columns.into_iter();
 
     let task_id = col_str(cols.next(), "task_id")?;
@@ -991,21 +981,18 @@ fn parse_task_row(row: scylla::frame::response::result::Row) -> Result<Task> {
     })
 }
 
-fn col_str(
-    v: Option<Option<scylla::frame::response::result::CqlValue>>,
-    name: &str,
-) -> Result<String> {
+fn col_str(v: Option<Option<CqlValue>>, name: &str) -> Result<String> {
     match v.flatten() {
-        Some(scylla::frame::response::result::CqlValue::Text(s)) => Ok(s),
-        Some(scylla::frame::response::result::CqlValue::Ascii(s)) => Ok(s),
+        Some(CqlValue::Text(s)) => Ok(s),
+        Some(CqlValue::Ascii(s)) => Ok(s),
         _ => Err(anyhow!("Missing or non-text column: {}", name)),
     }
 }
 
-fn col_opt_str(v: Option<Option<scylla::frame::response::result::CqlValue>>) -> Option<String> {
+fn col_opt_str(v: Option<Option<CqlValue>>) -> Option<String> {
     match v.flatten() {
-        Some(scylla::frame::response::result::CqlValue::Text(s)) => Some(s),
-        Some(scylla::frame::response::result::CqlValue::Ascii(s)) => Some(s),
+        Some(CqlValue::Text(s)) => Some(s),
+        Some(CqlValue::Ascii(s)) => Some(s),
         _ => None,
     }
 }
@@ -1013,11 +1000,7 @@ fn col_opt_str(v: Option<Option<scylla::frame::response::result::CqlValue>>) -> 
 /// `Ok(None)` for a CQL NULL, `Err` for a missing column or a non-text type.
 /// [`col_opt_str`] cannot tell those apart, which is fine where the column is
 /// genuinely optional and wrong where a decode failure would masquerade as one.
-fn col_opt_str_strict(
-    v: Option<Option<scylla::frame::response::result::CqlValue>>,
-    name: &str,
-) -> Result<Option<String>> {
-    use scylla::frame::response::result::CqlValue;
+fn col_opt_str_strict(v: Option<Option<CqlValue>>, name: &str) -> Result<Option<String>> {
     match v {
         None => Err(anyhow!("Missing column: {}", name)),
         Some(None) => Ok(None),
@@ -1031,12 +1014,7 @@ fn col_opt_str_strict(
 }
 
 /// A CQL `int`, defaulting when NULL but failing on a missing or mistyped column.
-fn col_i32_or(
-    v: Option<Option<scylla::frame::response::result::CqlValue>>,
-    name: &str,
-    default: i32,
-) -> Result<i32> {
-    use scylla::frame::response::result::CqlValue;
+fn col_i32_or(v: Option<Option<CqlValue>>, name: &str, default: i32) -> Result<i32> {
     match v {
         None => Err(anyhow!("Missing column: {}", name)),
         Some(None) => Ok(default),
@@ -1047,11 +1025,7 @@ fn col_i32_or(
 
 /// A CQL `bigint`. Missing, NULL, or mistyped are all errors: every caller uses
 /// these for ordering, and a fabricated 0 sorts the row out of sight.
-fn col_i64(
-    v: Option<Option<scylla::frame::response::result::CqlValue>>,
-    name: &str,
-) -> Result<i64> {
-    use scylla::frame::response::result::CqlValue;
+fn col_i64(v: Option<Option<CqlValue>>, name: &str) -> Result<i64> {
     match v.flatten() {
         Some(CqlValue::BigInt(i)) => Ok(i),
         Some(_) => Err(anyhow!("Column {} is not a bigint", name)),
@@ -1137,7 +1111,7 @@ pub fn page_hint(total: usize, offset: usize, returned: usize) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scylla::frame::response::result::{CqlValue, Row};
+    use scylla::value::{CqlValue, Row};
 
     #[test]
     fn primary_checkout_is_the_first_worktree_git_reports() {

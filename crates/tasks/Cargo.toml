@@ -10,7 +10,10 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
-scylla = "0.15"
+# ferrosadb/scylla-rust-driver `ferrosa/1.6.0-no-chrono`: driver 1.6.0 with
+# chrono removed (RUSTSEC-2026-0543), plus socket2 0.6, rand 0.10 and
+# hashbrown 0.17 so forge carries one copy of each. ferrosa pins the parent
+# commit, 05460867.
+scylla = { git = "https://github.com/ferrosadb/scylla-rust-driver.git", rev = "e5f28586" }
 tokio = { version = "1", features = ["rt"] }
-chrono = { workspace = true }
 toml = { workspace = true }
