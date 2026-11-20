@@ -662,14 +662,15 @@ fn detect_function(line: &str, idx: usize, lines: &[&str], lang: Lang) -> Option
         }
     }
 
-    // Extract the signature (up to the opening brace or colon)
-    let sig = line
-        .split('{')
-        .next()
-        .unwrap_or(line)
-        .split(':')
-        .next()
-        .unwrap_or(line);
+    // Extract the signature. Brace languages end it at the opening brace; a
+    // colon inside the parameter list (`fn add(a: u64)`) belongs to it.
+    // Python's signature ends at its last colon, after any annotations.
+    let head = line.split('{').next().unwrap_or(line);
+    let sig = match lang {
+        Lang::Rust | Lang::Go | Lang::TypeScript | Lang::Cpp => head,
+        Lang::Python => head.rsplit_once(':').map_or(head, |(sig, _)| sig),
+        Lang::Elixir | Lang::Other => head.split(':').next().unwrap_or(head),
+    };
 
     let doc = get_doc_comment(lines, idx);
     let end_line = Some(find_block_end(lines, idx));
@@ -812,6 +813,39 @@ mod tests {
             .collect();
         assert_eq!(imports.len(), 2);
         assert_eq!(fns.len(), 1);
+    }
+
+    #[test]
+    fn signatures_keep_typed_parameters() {
+        let sig = |file: &str, source: &str| {
+            summarize(file, source)
+                .elements
+                .into_iter()
+                .find(|e| e.kind == ElementKind::Function)
+                .map(|e| e.text)
+                .unwrap()
+        };
+        assert_eq!(
+            sig(
+                "lib.rs",
+                "pub fn add(a: u64, b: u64) -> u64 {\n    a + b\n}\n"
+            ),
+            "pub fn add(a: u64, b: u64) -> u64"
+        );
+        assert_eq!(
+            sig(
+                "app.ts",
+                "export function greet(name: string): string {\n  return name;\n}\n"
+            ),
+            "export function greet(name: string): string"
+        );
+        assert_eq!(
+            sig(
+                "m.py",
+                "def scale(x: float, k: float = 2.0) -> float:\n    return x * k\n"
+            ),
+            "def scale(x: float, k: float = 2.0) -> float"
+        );
     }
 
     #[test]

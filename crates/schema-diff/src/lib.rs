@@ -211,7 +211,10 @@ fn extract_keys(body: &str) -> (Vec<String>, Vec<String>) {
     // Look for an inline `PRIMARY KEY (...)` constraint.
     if let Some(idx) = upper.find("PRIMARY KEY") {
         let after = &body[idx + "PRIMARY KEY".len()..];
-        if let Some(open) = after.find('(') {
+        // Only a `(` directly after `PRIMARY KEY` opens a key list. In
+        // `id INT PRIMARY KEY, email VARCHAR(255)` the next `(` is VARCHAR's.
+        let open = after.len() - after.trim_start().len();
+        if after[open..].starts_with('(') {
             // Match closing paren with depth tracking.
             let mut depth: i32 = 0;
             let mut end = 0;
@@ -714,6 +717,17 @@ mod tests {
             .any(|c| matches!(c.kind, ChangeKind::LabelRemoved)
                 && matches!(c.severity, Severity::Breaking)));
         assert_eq!(report.suggested_bump, "major");
+    }
+
+    #[test]
+    fn inline_primary_key_ignores_later_type_parentheses() {
+        let before = "CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(255));";
+        let after = "CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(100));";
+        let report = diff_schemas(before, after, Some(Dialect::Sql)).unwrap();
+        assert!(!report
+            .changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::PrimaryKeyChanged)));
     }
 
     #[test]

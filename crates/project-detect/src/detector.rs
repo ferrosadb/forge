@@ -100,6 +100,8 @@ pub fn detect(dir: &Path) -> ProjectReport {
             || dir.join("jest.config.cjs").exists()
         {
             test_runners.push(comp("Jest", "jest.config.*"));
+        } else if package_json_declares_jest(dir) {
+            test_runners.push(comp("Jest", evidence));
         }
         if dir.join("vitest.config.ts").exists() || dir.join("vitest.config.js").exists() {
             test_runners.push(comp("Vitest", "vitest.config.*"));
@@ -328,6 +330,21 @@ fn comp(name: &str, evidence: &str) -> DetectedComponent {
     }
 }
 
+/// True when package.json lists Jest as a dependency or carries a `jest`
+/// configuration block, where a project without jest.config.* keeps it.
+fn package_json_declares_jest(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    pkg.get("jest").is_some()
+        || ["dependencies", "devDependencies"]
+            .iter()
+            .any(|section| pkg.get(section).and_then(|deps| deps.get("jest")).is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +356,7 @@ mod tests {
     // [x] Python project: pyproject.toml detected
     // [x] Go project: go.mod detected
     // [x] TypeScript project: tsconfig.json detected
+    // [x] Jest declared in package.json
     // [x] Elixir project: mix.exs detected
     // [x] C# project: .csproj detected
     // [x] C# solution: .sln detected
@@ -397,6 +415,21 @@ mod tests {
         let result = detect(dir.path());
         assert!(result.languages.iter().any(|c| c.name == "TypeScript"));
         assert!(result.test_runners.iter().any(|c| c.name == "Jest"));
+    }
+
+    #[test]
+    fn jest_declared_in_package_json() {
+        let dir = setup_dir(&[]);
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"devDependencies": {"jest": "^29.7.0"}}"#,
+        )
+        .unwrap();
+        let result = detect(dir.path());
+        assert!(result
+            .test_runners
+            .iter()
+            .any(|c| c.name == "Jest" && c.evidence == "package.json"));
     }
 
     #[test]
