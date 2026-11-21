@@ -1,15 +1,16 @@
 //! Module: Cognitive complexity engine — AST scoring, file walking, ranking.
 //! Correctness: Correct when unparsable or unreadable files are disclosed as
 //! failures rather than skipped, and every scored function reaches the totals.
-//! Last revised: 2026-10-01
-//! Last changed: Initial implementation, ranked refactoring targets.
+//! Last revised: 2026-11-19
+//! Last changed: Scores bodies with the in-crate syn 2 port of `complexity`.
 
 use anyhow::{Context, Result};
-use complexity::Complexity;
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::{Attribute, Block, ImplItem, Item, ItemFn, TraitItem, Type, Visibility};
+use syn::{Attribute, Block, ImplItem, Item, Meta, TraitItem, Type};
+
+use crate::score::block_complexity;
 
 use crate::report::{
     band, BandCounts, CognitiveReport, FailureKind, FileFailure, FunctionComplexity, FunctionKind,
@@ -155,12 +156,12 @@ pub fn analyze_source(file: &str, source: &str, config: &CognitiveConfig) -> Cog
 
 /// Parse one file and score everything in it.
 ///
-/// A parse *error* comes back as a `Parse` failure. A parse *panic* does too:
-/// `syn` 1 panics rather than erroring on syntax it cannot represent — notably
-/// Rust C-string literals (`c"..."`), which are valid Rust 1.77+ and appear in
-/// real code. An uncaught panic there would abort the entire scan and produce
-/// no report at all, so every file is isolated here. A scan must degrade to a
-/// disclosed per-file failure, never to a dead process.
+/// A parse *error* comes back as a `Parse` failure. A parse *panic* does too.
+/// syn 1 panicked on syntax it could not represent, such as C-string literals
+/// (`c"..."`); syn 2 parses those, but an uncaught panic from any parser bug
+/// would abort the whole scan with no report at all, so every file stays
+/// isolated here. A scan must degrade to a disclosed per-file failure, never
+/// to a dead process.
 fn parse_and_score(
     source: &str,
     file: &str,
@@ -194,10 +195,7 @@ fn parse_and_score(
         Err(payload) => Err(FileFailure {
             file: file.to_string(),
             kind: FailureKind::Parse,
-            detail: format!(
-                "parser panicked on unsupported syntax (commonly a C-string literal like c\"...\"): {}",
-                panic_message(&payload)
-            ),
+            detail: format!("parser panicked: {}", panic_message(&payload)),
         }),
     }
 }
@@ -283,16 +281,16 @@ fn collect_items(
                 if exclude_tests && is_test {
                     continue;
                 }
-                // `ItemFn::complexity()` is the upstream implementation and
-                // evaluates the body at nesting level 0. Do not re-wrap the
-                // body — that would add a nesting level and inflate the score.
+                // The body is scored at nesting level 0. Do not re-wrap it in
+                // a block expression: that adds a nesting level and inflates
+                // the score.
                 out.push(score(
                     file,
                     qualify(module_path, &func.sig.ident.to_string()),
                     FunctionKind::Function,
                     &func.sig,
                     &func.block,
-                    func.complexity(),
+                    block_complexity(&func.block),
                     is_test,
                 ));
             }
@@ -308,20 +306,18 @@ fn collect_items(
                 let self_ty = type_name(&impl_block.self_ty);
                 let is_test_impl = in_cfg_test || has_test_attr(&impl_block.attrs);
                 for impl_item in &impl_block.items {
-                    if let ImplItem::Method(method) = impl_item {
+                    if let ImplItem::Fn(method) = impl_item {
                         let is_test = is_test_impl || has_test_attr(&method.attrs);
                         if exclude_tests && is_test {
                             continue;
                         }
-                        // `ImplItemMethod::complexity()` is upstream's own
-                        // evaluation of the method body.
                         out.push(score(
                             file,
                             format!("{self_ty}::{}", method.sig.ident),
                             FunctionKind::Method,
                             &method.sig,
                             &method.block,
-                            method.complexity(),
+                            block_complexity(&method.block),
                             is_test,
                         ));
                     }
@@ -331,7 +327,7 @@ fn collect_items(
                 let is_test_trait = in_cfg_test || has_test_attr(&trait_block.attrs);
                 for trait_item in &trait_block.items {
                     // Only methods with a default body have code to score.
-                    if let TraitItem::Method(method) = trait_item {
+                    if let TraitItem::Fn(method) = trait_item {
                         let Some(block) = &method.default else {
                             continue;
                         };
@@ -345,7 +341,7 @@ fn collect_items(
                             FunctionKind::Method,
                             &method.sig,
                             block,
-                            trait_default_complexity(&method.sig.ident, block),
+                            block_complexity(block),
                             is_test,
                         ));
                     }
@@ -367,8 +363,8 @@ fn qualify(module_path: &[String], name: &str) -> String {
 /// Build one scored entry for a scored block.
 ///
 /// `cognitive` is passed in rather than computed here so that every caller
-/// routes through the upstream implementation (never a re-wrapped body, which
-/// would add a nesting level and inflate the score).
+/// scores the body itself (never a re-wrapped body, which would add a nesting
+/// level and inflate the score).
 fn score(
     file: &str,
     name: String,
@@ -403,34 +399,6 @@ fn body_lines(sig: &syn::Signature, block: &Block) -> usize {
     end.saturating_sub(start) + 1
 }
 
-/// Score a trait method's default body.
-///
-/// `complexity` 0.2 only exposes `Complexity` for `ItemFn` and
-/// `ImplItemMethod`, so rebuild the default body as an `ItemFn` with no
-/// visibility and evaluate it with the upstream implementation. The score is
-/// identical to evaluating the body directly; the shim is structural only.
-fn trait_default_complexity(ident: &syn::Ident, block: &Block) -> u32 {
-    let item = ItemFn {
-        attrs: Vec::new(),
-        vis: Visibility::Inherited,
-        sig: syn::Signature {
-            constness: None,
-            asyncness: None,
-            unsafety: None,
-            abi: None,
-            fn_token: Default::default(),
-            ident: ident.clone(),
-            generics: Default::default(),
-            paren_token: Default::default(),
-            inputs: Default::default(),
-            variadic: None,
-            output: syn::ReturnType::Default,
-        },
-        block: Box::new(block.clone()),
-    };
-    item.complexity()
-}
-
 /// Best-effort self-type label for name qualification, e.g. `Engine`.
 fn type_name(ty: &Type) -> String {
     match ty {
@@ -447,10 +415,15 @@ fn type_name(ty: &Type) -> String {
 /// True for `#[test]` or `#[cfg(test)]` items.
 fn has_test_attr(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
-        if attr.path.is_ident("test") {
+        if attr.path().is_ident("test") {
             return true;
         }
-        attr.path.is_ident("cfg") && attr.tokens.to_string().contains("test")
+        match &attr.meta {
+            Meta::List(list) => {
+                list.path.is_ident("cfg") && list.tokens.to_string().contains("test")
+            }
+            _ => false,
+        }
     })
 }
 

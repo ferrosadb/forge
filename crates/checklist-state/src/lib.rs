@@ -10,7 +10,7 @@
 //! All writes are atomic: write to a sibling temp file, then rename.
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,7 +77,7 @@ pub enum GateKind {
 #[serde(rename_all = "camelCase")]
 pub struct WaitingGate {
     pub kind: GateKind,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub question: Option<String>,
@@ -115,7 +115,7 @@ pub struct AttemptState {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub post_pivot_return_count: u32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub last_progress_at: Option<DateTime<Utc>>,
+    pub last_progress_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub next_attempt_number: u32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -159,7 +159,7 @@ pub struct ActiveAttempt {
     pub execution_fingerprint: String,
     pub agent_id: String,
     pub role: AttemptRole,
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -178,7 +178,7 @@ pub struct FinishedAttempt {
     pub execution_fingerprint: String,
     pub agent_id: String,
     pub role: AttemptRole,
-    pub finished_at: DateTime<Utc>,
+    pub finished_at: Timestamp,
     pub result_signature: String,
     pub progress: String,
     pub new_information: String,
@@ -245,7 +245,7 @@ pub struct ReviewInput {
     pub review_id: String,
     pub outcome: ReviewOutcome,
     pub reviewer_id: String,
-    pub reviewed_at: DateTime<Utc>,
+    pub reviewed_at: Timestamp,
     pub reason: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feedback: Vec<ReviewFeedbackInput>,
@@ -267,7 +267,7 @@ pub struct ReviewRecord {
     pub review_id: String,
     pub outcome: ReviewOutcome,
     pub reviewer_id: String,
-    pub reviewed_at: DateTime<Utc>,
+    pub reviewed_at: Timestamp,
     pub reason: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feedback: Vec<ReviewFeedback>,
@@ -304,7 +304,7 @@ pub struct HumanPreferenceChange {
     pub operation: HumanPreferenceOperation,
     pub actor: String,
     pub reason: String,
-    pub changed_at: DateTime<Utc>,
+    pub changed_at: Timestamp,
     pub restore_priority_state: bool,
 }
 
@@ -316,7 +316,7 @@ pub struct HumanPreferenceAudit {
     pub new_value: Option<i32>,
     pub actor: String,
     pub reason: String,
-    pub changed_at: DateTime<Utc>,
+    pub changed_at: Timestamp,
     pub restored_priority_state: bool,
 }
 
@@ -339,7 +339,7 @@ pub struct ChecklistItem {
     #[serde(default = "default_status")]
     pub status: ItemStatus,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<Timestamp>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -353,7 +353,7 @@ pub struct ChecklistItem {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub claimed_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub lease_expires_at: Option<Timestamp>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub gate: Option<WaitingGate>,
     #[serde(rename = "goalRef", skip_serializing_if = "Option::is_none", default)]
@@ -419,8 +419,8 @@ pub struct ChecklistItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checklist {
     pub name: String,
-    pub created: DateTime<Utc>,
-    pub updated: DateTime<Utc>,
+    pub created: Timestamp,
+    pub updated: Timestamp,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source_skill: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -831,7 +831,7 @@ fn deps_completed(cl: &Checklist, item: &ChecklistItem, index: &BTreeMap<String,
     })
 }
 
-fn is_expired(item: &ChecklistItem, now: DateTime<Utc>) -> bool {
+fn is_expired(item: &ChecklistItem, now: Timestamp) -> bool {
     item.lease_expires_at
         .map(|lease| lease <= now)
         .unwrap_or(false)
@@ -839,7 +839,7 @@ fn is_expired(item: &ChecklistItem, now: DateTime<Utc>) -> bool {
 
 fn ready_items_from(
     cl: &Checklist,
-    now: DateTime<Utc>,
+    now: Timestamp,
     include_expired_leases: bool,
     limit: Option<usize>,
 ) -> Result<Vec<ChecklistItem>> {
@@ -1048,7 +1048,7 @@ fn score_explanation(components: &ScoreComponents, effective_score: i64) -> Stri
 pub fn score_checklist(
     cl: &Checklist,
     policy: &ScorePolicy,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<ScoreReport> {
     validate_score_policy(policy)?;
     let validation = validate_dependencies(cl);
@@ -1116,7 +1116,7 @@ pub fn score_checklist(
             .saturating_neg();
         let elapsed_intervals = attempt_state
             .and_then(|state| state.last_progress_at)
-            .map(|at| now.signed_duration_since(at).num_seconds().max(0))
+            .map(|at| now.duration_since(at).as_secs().max(0))
             .unwrap_or(0)
             / policy.decay.interval_seconds;
         let decay_recovery = policy
@@ -1289,9 +1289,15 @@ fn canonical_gate_state(gate: &WaitingGate) -> CanonicalGateState {
 }
 
 fn sha256_json<T: Serialize>(value: &T) -> Result<String> {
+    use std::fmt::Write as _;
     let encoded = serde_json::to_vec(value).context("failed to serialize attempt fingerprint")?;
     let digest = Sha256::digest(encoded);
-    Ok(format!("sha256:{digest:x}"))
+    let mut out = String::with_capacity("sha256:".len() + 2 * digest.len());
+    out.push_str("sha256:");
+    for byte in digest.iter() {
+        write!(out, "{byte:02x}").context("failed to format attempt fingerprint")?;
+    }
+    Ok(out)
 }
 
 fn canonical_execution_fingerprint(
@@ -1413,7 +1419,7 @@ pub fn create(dir: &Path, name: &str, titles: &[String]) -> Result<Checklist> {
     if path.exists() {
         bail!("checklist '{}' already exists at {}", name, path.display());
     }
-    let now = Utc::now();
+    let now = Timestamp::now();
     let mut items = Vec::with_capacity(titles.len());
     let mut seen_ids: Vec<String> = Vec::new();
     for title in titles {
@@ -1478,7 +1484,7 @@ pub fn create_dag_from_items(
     name: &str,
     mut items: Vec<ChecklistItem>,
 ) -> Result<Checklist> {
-    let now = Utc::now();
+    let now = Timestamp::now();
     for item in items.iter_mut() {
         item.completed_at = if item.status == ItemStatus::Completed {
             item.completed_at.or(Some(now))
@@ -1566,7 +1572,7 @@ pub fn ready(
     include_expired_leases: bool,
 ) -> Result<ReadyReport> {
     let cl = show(dir, name)?;
-    let items = ready_items_from(&cl, Utc::now(), include_expired_leases, limit)?;
+    let items = ready_items_from(&cl, Timestamp::now(), include_expired_leases, limit)?;
     Ok(ReadyReport {
         checklist: cl.name,
         ready_count: items.len(),
@@ -1584,7 +1590,7 @@ pub fn scored_ready(
     limit: Option<usize>,
 ) -> Result<ScoredReadyReport> {
     let checklist = show(dir, name)?;
-    let now = Utc::now();
+    let now = Timestamp::now();
     let ready_items = ready_items_from(&checklist, now, false, None)?;
     let scores = score_checklist(&checklist, policy, now)?
         .items
@@ -1622,7 +1628,7 @@ pub fn scored_ready(
 /// Load and score an existing checklist using the caller-supplied policy.
 pub fn score(dir: &Path, name: &str, policy: &ScorePolicy) -> Result<ScoreReport> {
     let checklist = show(dir, name)?;
-    score_checklist(&checklist, policy, Utc::now())
+    score_checklist(&checklist, policy, Timestamp::now())
 }
 
 /// Atomically claim ready items for an agent. Same-agent expired/in-progress claims
@@ -1652,10 +1658,10 @@ pub fn claim(
         bail!("checklist '{}' not found at {}", name, path.display());
     }
     let mut cl = read_checklist(&path)?;
-    let now = Utc::now();
+    let now = Timestamp::now();
     let ready = ready_items_from(&cl, now, include_expired_leases, Some(limit))?;
     let ready_ids: BTreeSet<String> = ready.iter().map(|item| item.id.clone()).collect();
-    let lease_expires_at = now + Duration::minutes(lease_minutes);
+    let lease_expires_at = now + SignedDuration::from_mins(lease_minutes);
     let mut claimed = Vec::new();
 
     for item in cl.items.iter_mut() {
@@ -1715,7 +1721,7 @@ pub fn release(dir: &Path, name: &str, item_id: &str, agent_id: Option<&str>) ->
     if !found {
         bail!("item id '{}' not found in checklist '{}'", item_id, name);
     }
-    cl.updated = Utc::now();
+    cl.updated = Timestamp::now();
     write_checklist_atomic(&path, &cl)?;
     Ok(cl)
 }
@@ -1732,7 +1738,7 @@ pub fn set(dir: &Path, name: &str, item_id: &str, status: ItemStatus) -> Result<
         bail!("checklist '{}' not found at {}", name, path.display());
     }
     let mut cl = read_checklist(&path)?;
-    let now = Utc::now();
+    let now = Timestamp::now();
     let mut found = false;
     for item in cl.items.iter_mut() {
         if item.id == item_id {
@@ -1783,7 +1789,7 @@ pub fn set_waiting(dir: &Path, name: &str, item_id: &str, gate: WaitingGate) -> 
     if !found {
         bail!("item id '{}' not found in checklist '{}'", item_id, name);
     }
-    cl.updated = Utc::now();
+    cl.updated = Timestamp::now();
     write_checklist_atomic(&path, &cl)?;
     Ok(cl)
 }
@@ -1864,7 +1870,7 @@ pub fn resolve_waiting(
     item.completed_at = None;
     item.claimed_by = None;
     item.lease_expires_at = None;
-    checklist.updated = Utc::now();
+    checklist.updated = Timestamp::now();
     write_checklist_atomic(&path, &checklist)?;
     Ok(ResolveReport {
         state: checklist,
@@ -2151,7 +2157,7 @@ pub fn apply_review(
     if !report.valid {
         bail!("invalid review transaction: {}", report.errors.join("; "));
     }
-    checklist.updated = Utc::now();
+    checklist.updated = Timestamp::now();
     write_checklist_atomic(&path, &checklist)?;
     Ok(checklist)
 }
@@ -2194,7 +2200,7 @@ pub fn declare_transient_retry_limit(
     }
     state.exact_retry_limit = Some(exact_retry_limit);
     state.exact_retry_execution_fingerprint = Some(execution_fingerprint);
-    checklist.updated = Utc::now();
+    checklist.updated = Timestamp::now();
     write_checklist_atomic(&path, &checklist)?;
     Ok(checklist)
 }
@@ -2249,7 +2255,7 @@ pub fn attempt_start(
         .iter()
         .position(|item| item.id == item_id)
         .ok_or_else(|| anyhow!("item id '{}' not found in checklist '{}'", item_id, name))?;
-    let now = Utc::now();
+    let now = Timestamp::now();
     let item = &mut checklist.items[position];
     if item.status != ItemStatus::InProgress {
         bail!("item '{}' must be in_progress to start an attempt", item_id);
@@ -2397,7 +2403,7 @@ pub fn attempt_finish(
         &active.execution_fingerprint,
         &finish.result_signature,
     )?;
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     if state.last_fingerprint.as_deref() == Some(fingerprint.as_str())
         && state.last_execution_fingerprint.as_deref()
@@ -2453,7 +2459,7 @@ pub fn note(dir: &Path, name: &str, item_id: &str, note: &str) -> Result<Checkli
     if !found {
         bail!("item id '{}' not found in checklist '{}'", item_id, name);
     }
-    cl.updated = Utc::now();
+    cl.updated = Timestamp::now();
     write_checklist_atomic(&path, &cl)?;
     Ok(cl)
 }
@@ -2512,7 +2518,7 @@ mod tests {
     }
 
     fn dag(items: Vec<ChecklistItem>) -> Checklist {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Checklist {
             name: "dag".to_string(),
             created: now,
@@ -2600,7 +2606,7 @@ mod tests {
     // - [x] Human preference set/replace/clear is audited and can restore priority state.
     #[test]
     fn score_exposes_policy_driven_named_components() {
-        let now: DateTime<Utc> = "2026-07-12T20:00:00Z".parse().unwrap();
+        let now: Timestamp = "2026-07-12T20:00:00Z".parse().unwrap();
         let mut prerequisite = item("A", &[]);
         prerequisite.base_priority = Some(40);
         prerequisite.effort = Some(Effort::Small);
@@ -2661,7 +2667,7 @@ mod tests {
     #[test]
     fn priority_preference_set_replace_clear_is_audited_and_can_restore_state() {
         let tmp = TempDir::new().unwrap();
-        let changed_at: DateTime<Utc> = "2026-07-12T21:00:00Z".parse().unwrap();
+        let changed_at: Timestamp = "2026-07-12T21:00:00Z".parse().unwrap();
         let mut target = item("T-004", &[]);
         target.attempt_state = Some(AttemptState {
             same_attempt_count: 3,
@@ -2722,7 +2728,7 @@ mod tests {
                 operation: HumanPreferenceOperation::Replace(30),
                 actor: "human:owner".to_string(),
                 reason: "Increase preference after review".to_string(),
-                changed_at: changed_at + Duration::minutes(1),
+                changed_at: changed_at + SignedDuration::from_mins(1),
                 restore_priority_state: false,
             },
         )
@@ -2743,7 +2749,7 @@ mod tests {
                 operation: HumanPreferenceOperation::Clear,
                 actor: "human:owner".to_string(),
                 reason: "Return to policy score".to_string(),
-                changed_at: changed_at + Duration::minutes(2),
+                changed_at: changed_at + SignedDuration::from_mins(2),
                 restore_priority_state: false,
             },
         )
@@ -2781,7 +2787,7 @@ mod tests {
         create_dag_from_items(tmp.path(), "preference-policy", vec![item("T-004", &[])]).unwrap();
         let path = checklist_path(tmp.path(), "preference-policy");
         let before = fs::read(&path).unwrap();
-        let at: DateTime<Utc> = "2026-07-12T21:00:00Z".parse().unwrap();
+        let at: Timestamp = "2026-07-12T21:00:00Z".parse().unwrap();
 
         for (operation, actor, reason) in [
             (
@@ -2821,7 +2827,7 @@ mod tests {
     #[test]
     fn priority_human_restore_suppresses_inherited_goal_penalty_for_that_item_only() {
         let tmp = TempDir::new().unwrap();
-        let at: DateTime<Utc> = "2026-07-12T21:00:00Z".parse().unwrap();
+        let at: Timestamp = "2026-07-12T21:00:00Z".parse().unwrap();
         let mut restored = item("restored", &[]);
         restored.goal_ref = Some("G".to_string());
         let mut sibling = item("sibling", &[]);
@@ -2856,7 +2862,7 @@ mod tests {
 
     #[test]
     fn priority_goal_penalty_requires_cross_item_fixation_or_repeated_post_pivot_returns() {
-        let now: DateTime<Utc> = "2026-07-12T20:00:00Z".parse().unwrap();
+        let now: Timestamp = "2026-07-12T20:00:00Z".parse().unwrap();
         let mut first = item("first", &[]);
         first.goal_ref = Some("G".to_string());
         first.attempt_state = Some(AttemptState {
@@ -2896,7 +2902,7 @@ mod tests {
 
     #[test]
     fn score_keeps_critical_waiting_item_at_floor_with_help_metadata() {
-        let now: DateTime<Utc> = "2026-07-12T20:00:00Z".parse().unwrap();
+        let now: Timestamp = "2026-07-12T20:00:00Z".parse().unwrap();
         let mut waiting = item("critical", &[]);
         waiting.status = ItemStatus::Waiting;
         waiting.gate = Some(WaitingGate {
@@ -2936,7 +2942,7 @@ mod tests {
 
     #[test]
     fn score_caps_decay_and_rewards_paths_to_penalized_items_and_goals() {
-        let now: DateTime<Utc> = "2026-07-12T20:00:00Z".parse().unwrap();
+        let now: Timestamp = "2026-07-12T20:00:00Z".parse().unwrap();
         let mut decayed = item("decayed", &[]);
         decayed.attempt_state = Some(AttemptState {
             retry_penalty: 1,
@@ -4112,6 +4118,50 @@ mod tests {
             self_gated.items[0].gate.as_ref().unwrap().kind,
             GateKind::LoopDetected
         );
+    }
+
+    /// Attempt fingerprints are saved in checklist files and compared on the
+    /// next attempt, so their text must not change with the sha2 version.
+    #[test]
+    fn sha256_json_fingerprint_text_is_stable() {
+        // SHA-256 of the JSON encoding `"abc"`, quotes included.
+        assert_eq!(
+            sha256_json(&"abc").unwrap(),
+            "sha256:6cc43f858fbb763301637b5af970e2a46b46f461f27e5a0f41e009c59b827b25"
+        );
+    }
+
+    /// Checklist files on disk hold timestamps with whole, 6-digit and 9-digit
+    /// fractional seconds. Every shape must load, and saving must write each
+    /// instant back in the same text, so files stay readable by older binaries.
+    #[test]
+    fn on_disk_timestamp_shapes_load_and_save_unchanged() {
+        let json = r#"{
+          "name": "timestamps",
+          "created": "2026-07-12T17:00:00.123456789Z",
+          "updated": "2026-07-12T18:00:00.123456Z",
+          "items": [{
+            "id": "T-001",
+            "title": "done",
+            "status": "completed",
+            "completed_at": "2026-07-12T19:00:00Z",
+            "lease_expires_at": "2026-07-12T20:00:00.000001Z"
+          }]
+        }"#;
+
+        let checklist: Checklist = serde_json::from_str(json).unwrap();
+        let saved = serde_json::to_value(&checklist).unwrap();
+        assert_eq!(saved["created"], "2026-07-12T17:00:00.123456789Z");
+        assert_eq!(saved["updated"], "2026-07-12T18:00:00.123456Z");
+        assert_eq!(saved["items"][0]["completed_at"], "2026-07-12T19:00:00Z");
+        assert_eq!(
+            saved["items"][0]["lease_expires_at"],
+            "2026-07-12T20:00:00.000001Z"
+        );
+
+        let reloaded: Checklist = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&reloaded).unwrap(), saved);
+        assert!(checklist.created < checklist.updated);
     }
 
     #[test]

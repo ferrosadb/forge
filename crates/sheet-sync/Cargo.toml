@@ -15,14 +15,14 @@ dirs = { workspace = true }
 # Pinned to the same major as the getrandom already pulled in transitively
 # by the ureq -> rustls-platform-verifier -> ring chain (see Cargo.lock),
 # to avoid a duplicate major version in the dependency graph.
-getrandom = "0.2"
+getrandom = "0.4"
 # RS256-signs service-account JWTs for headless auth (see
 # `service_account::build_jwt`). Already in the dependency tree transitively
 # via ureq -> rustls -> ring, so this adds no new advisory surface for
 # `cargo deny` — unlike the RustCrypto `rsa` crate (RUSTSEC-2023-0071),
 # which this deliberately avoids.
 ring = "0.17"
-base64 = "0.22"
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

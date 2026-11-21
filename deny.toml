@@ -19,12 +19,7 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = [
-    # chrono is unmaintained with no patched release. Forge uses it directly
-    # and through scylla 0.15 (forge-tasks). Remove this entry when Forge drops
-    # chrono, as ferrosa did with its own temporal module and chrono-free forks.
-    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no patched release; used directly and via scylla 0.15" },
-]
+ignore = []
 
 [licenses]
 # Workspace crates don't declare `license = ...` individually — they're
@@ -62,3 +57,10 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    # forge-tasks' CQL driver: the ferrosadb/scylla-rust-driver
+    # `ferrosa/1.6.0-no-chrono` branch, pinned by rev in crates/tasks/Cargo.toml.
+    # Every upstream scylla release requires chrono, which RUSTSEC-2026-0543
+    # marks unmaintained. ferrosa pins the same fork.
+    "https://github.com/ferrosadb/scylla-rust-driver.git",
+]

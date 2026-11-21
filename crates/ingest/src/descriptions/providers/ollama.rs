@@ -128,7 +128,7 @@ impl DescriptionProvider for OllamaProvider {
         let provenance = Provenance {
             provider: self.label().into(),
             model: self.model.clone(),
-            extracted_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            extracted_at: format!("{:.0}", jiff::Timestamp::now()),
             redactions: 0, // Filled in by orchestrator with snippet's redaction count
         };
         schema::validate(raw, 60, provenance)

@@ -162,6 +162,16 @@ mod tests {
 
     use super::*;
 
+    /// Hashes are stored and compared across runs, so the hex text must not
+    /// change with the sha2 version: FIPS 180-2's "abc" vector.
+    #[test]
+    fn hex_sha256_matches_the_standard_test_vector() {
+        assert_eq!(
+            hex_sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
     /// T1 verification: `source_buffer::small_file_has_text`
     /// A file under MAX_FILE_BYTES should have truncated=false and text=Some.
     #[test]

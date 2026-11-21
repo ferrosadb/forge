@@ -16,7 +16,6 @@
 //! - Emitted paths use POSIX separators (`/`) regardless of platform (F10).
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Utc};
 use forge_shared::secrets::is_secret_filename;
 use globset::{Glob, GlobMatcher};
 use ignore::WalkBuilder;
@@ -306,10 +305,14 @@ fn read_file_stats(path: &Path) -> Option<(u64, String)> {
     Some((total_lines, first_line))
 }
 
-/// Convert a SystemTime to an ISO 8601 UTC string, with graceful fallback.
-fn format_mtime(mtime: SystemTime) -> String {
-    let dt: DateTime<Utc> = mtime.into();
-    dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+/// Convert a SystemTime to an RFC 3339 UTC string with whole seconds.
+///
+/// Fails for an mtime outside years -9999..=9999, which no real filesystem
+/// reports; chrono panicked on the same input.
+fn format_mtime(mtime: SystemTime) -> Result<String> {
+    let ts =
+        jiff::Timestamp::try_from(mtime).context("file mtime is outside years -9999..=9999")?;
+    Ok(format!("{ts:.0}"))
 }
 
 /// Returns the number of seconds since mtime, or u64::MAX on clock errors.
@@ -499,7 +502,7 @@ pub fn collect(config: &GlobConfig) -> Result<GlobResult> {
             path: path_str,
             lines,
             bytes,
-            modified: format_mtime(mtime),
+            modified: format_mtime(mtime)?,
             is_generated,
             path_encoding,
         });

@@ -8,10 +8,10 @@
 //!   is attached to the response; the tool still serves.
 //! - **Critical** (board quorum lost) → the call fails so the agent halts.
 //!
-//! Detection is the **driver's own cluster view** ([`scylla::transport::ClusterData`]):
+//! Detection is the **driver's own cluster view** ([`scylla::cluster::ClusterState`]):
 //! `get_nodes_info()` is the membership the driver discovered from `system.peers`
-//! (the advertised client addresses, NAT/Docker-correct), and `Node::is_down()` is
-//! the driver's liveness marker. We read that rather than re-probing seeds — it is
+//! (the advertised client addresses, NAT/Docker-correct), and `Node::is_connected()`
+//! says whether the driver holds an open connection to that node. We read that rather than re-probing seeds — it is
 //! the same topology the driver actually routes queries over, so it can't lie.
 
 use serde::Serialize;

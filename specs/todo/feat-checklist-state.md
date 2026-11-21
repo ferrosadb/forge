@@ -76,7 +76,7 @@ All operations return the current state of the checklist as JSON (or the list of
 
 ## Dependencies
 
-- `serde`, `serde_json`, `chrono`, `anyhow`, `forge-shared`.
+- `serde`, `serde_json`, `jiff`, `anyhow`, `forge-shared`.
 - No database — flat JSON files, atomic writes via temp+rename.
 
 ## Test plan

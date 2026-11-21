@@ -49,6 +49,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   elements) that sit inside a cognitively dense element — the combination that
   makes a refactor high-value rather than merely tidy.
 
+### Changed
+
+- **chrono is gone from the dependency graph (RUSTSEC-2026-0543).** Every
+  chrono release is marked unmaintained, so `cargo deny check` failed with no
+  version to upgrade to. Forge's own timestamps now use `jiff`; checklist files
+  keep the same RFC 3339 text, so files written by older builds load and older
+  builds can read new ones. The task board (`forge-tasks`) moves from scylla
+  0.15 to the ferrosadb/scylla-rust-driver `ferrosa/1.6.0-no-chrono` branch.
+- **Board health counts a node as up only while the driver holds a connection
+  to it.** Driver 1.x removed `Node::is_down()`, which followed the cluster's
+  node up/down events; `is_connected()` reads the driver's own connection pool.
+- **`frg todo-extract` leaves a line's age unknown when git reports an author
+  time outside years -9999..=9999.** It used to report that line as zero days
+  old.
+- **`frg cognitive-complexity` scores `let ... else` statements.** The scorer
+  is now an in-crate syn 2 port of the `complexity` 0.2 crate, which was built
+  on syn 1. syn 1 read a let-else statement as unparsed tokens, so its
+  initializer and `else` block scored nothing. Functions that use let-else
+  score one or two points higher; over forge and ferrosa that is 177 of
+  30,590 functions, and every other score is unchanged. Files using syntax
+  syn 1 could not parse, such as `c"..."` literals, are now scored instead of
+  reported as failures.
+- **Fewer duplicate crate versions in the build.** dirs 7, ureq 3.5, base64
+  0.23, getrandom 0.4, thiserror 2, rand 0.10 and sha2 0.11, plus a scylla
+  fork commit moving the driver to socket2 0.6, rand 0.10 and hashbrown 0.17,
+  cut cargo-deny's duplicate warnings from 20 to 5. The 5 left come from
+  crates already on their latest releases (ring, dashmap, thiserror-impl and
+  getrandom's wasi bindings).
+
 ### Fixed
 
 - **A `c"..."` C-string literal no longer kills a whole scan.** `syn` 1 panics
