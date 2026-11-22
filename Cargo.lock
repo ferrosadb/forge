@@ -599,7 +599,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forge"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "clap",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "forge-api-diff"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-outline",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "forge-checklist-state"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "jiff",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "forge-cognitive-complexity"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "ignore",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "forge-concurrency-scan"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "forge-coverage-gate"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "forge-dep-tree"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "ignore",
@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "forge-deps-audit"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "regex",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "forge-devtools"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "regex",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "forge-diff-filter"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "forge-digest"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "dirs",
@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "forge-doc-coverage"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "forge-dsm-analyze"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-cognitive-complexity",
@@ -797,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "forge-fail-loud-scan"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "ignore",
@@ -817,7 +817,7 @@ dependencies = [
 
 [[package]]
 name = "forge-fmem-client"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "base64",
@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "forge-format-fix"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-project-detect",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "forge-ingest"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-fmem-client",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "forge-lint-dedup"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "forge-log-distill"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "forge-log-monitor"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -900,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "forge-materialization-scan"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "ignore",
  "regex",
@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mcp-probe"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "base64",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mcp-server"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "base64",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "forge-merge-check"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "serde",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mermaid-validate"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "regex",
@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "forge-outline"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "regex",
  "serde",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "forge-project-detect"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "forge-schema-diff"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "regex",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "forge-secret-scan"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "ignore",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "forge-shared"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "forge-sheet-sync"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "base64",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "forge-smell-detect"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-cognitive-complexity",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "forge-tasks"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "forge-test-summary"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "forge-shared",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "forge-threat-scan"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "ignore",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "forge-todo-extract"
-version = "0.19.0"
+version = "0.19.0-nightly"
 dependencies = [
  "anyhow",
  "ignore",
