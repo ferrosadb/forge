@@ -15,6 +15,19 @@ use crate::summarizer::{self, ElementKind};
 pub struct LookupResult {
     pub method: String,
     pub matches: Vec<SymbolMatch>,
+    /// How to get a language server for this project, when the answer fell
+    /// back to the source walk and one is missing. `None` when a server
+    /// answered, or when the language has no known server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_advice: Option<LspAdvice>,
+}
+
+/// What to tell the model when its lookup ran without a language server.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LspAdvice {
+    pub language: String,
+    pub binary: String,
+    pub install: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,9 +70,88 @@ pub fn lookup_symbol(symbol: &str, dir: &Path) -> anyhow::Result<LookupResult> {
         return Ok(LookupResult {
             method: "lsp".to_string(),
             matches,
+            lsp_advice: None,
         });
     }
     Ok(walked)
+}
+
+/// [`lookup_symbol`] with the language-server state injected, so the advice
+/// rule is testable without depending on what this machine happens to have
+/// installed. `lsp_path` is the resolved server, or `None` when there is none.
+///
+/// The advice is the **only** way a model learns a server is missing: forge
+/// prints its install prompt to stderr (`ingest::lsp::prompt_lsp_install`),
+/// where the model never reads it. So it rides on the answer, beside the
+/// matches rather than instead of them.
+pub fn lookup_symbol_with_lsp_state(
+    symbol: &str,
+    dir: &Path,
+    lsp_path: Option<&str>,
+) -> anyhow::Result<LookupResult> {
+    let mut result = lookup_symbol(symbol, dir)?;
+    // A server answered: nothing to advise.
+    if lsp_path.is_some() || result.method != "grep" {
+        return Ok(result);
+    }
+    result.lsp_advice = lsp_advice_for(dir);
+    Ok(result)
+}
+
+/// The advice for the project at `dir`, from the language its sources show.
+///
+/// `None` when no source names a language forge knows a server for — inventing
+/// an install command for an unsupported language would be advice the model
+/// can never act on.
+fn lsp_advice_for(dir: &Path) -> Option<LspAdvice> {
+    let language = dominant_language(dir)?;
+    let info = forge_ingest::lsp::lsp_for_language(&language)?;
+    Some(LspAdvice {
+        language,
+        binary: info.binary.to_string(),
+        install: info.install.to_string(),
+    })
+}
+
+/// The source language with the most files under `dir`, by extension.
+///
+/// Shallow and cheap on purpose: it reads the walk's own file list, not a
+/// parser, so a lookup never pays a second scan to learn what to advise.
+pub fn dominant_language(dir: &Path) -> Option<String> {
+    use std::collections::HashMap;
+
+    let mut counts: HashMap<&'static str, usize> = HashMap::new();
+    for entry in ignore::WalkBuilder::new(dir)
+        .hidden(true)
+        .git_ignore(true)
+        .build()
+        .flatten()
+    {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if let Some(lang) = language_for_ext(ext) {
+            *counts.entry(lang).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|&(_, n)| n)
+        .map(|(l, _)| l.to_string())
+}
+
+/// The language a source extension names, for the servers forge knows.
+fn language_for_ext(ext: &str) -> Option<&'static str> {
+    match ext {
+        "rs" => Some("rust"),
+        "py" => Some("python"),
+        "go" => Some("go"),
+        "ts" | "tsx" | "js" | "jsx" => Some("typescript"),
+        "ex" | "exs" => Some("elixir"),
+        _ => None,
+    }
 }
 
 /// The source-walk half of [`lookup_symbol`].
@@ -138,6 +230,7 @@ fn walk_symbol(symbol: &str, dir: &Path) -> anyhow::Result<LookupResult> {
 
     Ok(LookupResult {
         method: "grep".to_string(),
+        lsp_advice: None,
         matches,
     })
 }
@@ -226,6 +319,7 @@ mod tests {
         let result = LookupResult {
             method: "grep".to_string(),
             matches: vec![],
+            lsp_advice: None,
         };
         let out = format_lookup(&result);
         assert!(out.contains("No matches found"));
@@ -243,6 +337,7 @@ mod tests {
                 preview: "pub fn process_data(input".to_string(),
                 excerpt_command: "frg excerpt src/main.rs:process_data".to_string(),
             }],
+            lsp_advice: None,
         };
         let out = format_lookup(&result);
         assert!(out.contains("1 matches"));
@@ -346,6 +441,7 @@ mod tests {
         let result = LookupResult {
             method: "lsp_hint".to_string(),
             matches: vec![],
+            lsp_advice: None,
         };
         let rendered = format_lookup(&result);
         assert!(
@@ -368,6 +464,63 @@ mod tests {
             !rendered.contains("mcp__plugin_"),
             "the answer names a foreign tool namespace: {rendered}"
         );
+    }
+
+    #[test]
+    fn a_grep_fallback_on_a_rust_tree_says_to_install_rust_analyzer() {
+        // Measured 2026-11-23: without a language server the walk parses every
+        // candidate file, and a model that never learns an LSP is *missing*
+        // just keeps paying that. The answer must carry the install command —
+        // as one of forge's own tools, not a hint printed to stderr where the
+        // model cannot see it.
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("a.rs"), "pub fn thing() {}\n").expect("write");
+        let result = lookup_symbol_with_lsp_state("thing", dir.path(), None).expect("lookup");
+        let advice = result
+            .lsp_advice
+            .expect("a grep answer with no server must advise one");
+        assert_eq!(advice.language, "rust");
+        assert_eq!(advice.binary, "rust-analyzer");
+        assert!(
+            advice.install.contains("rust-analyzer"),
+            "the install command must name the binary: {}",
+            advice.install
+        );
+    }
+
+    #[test]
+    fn no_advice_is_offered_when_the_server_is_present_or_the_language_is_unknown() {
+        // Two negative controls. An LSP that IS answering needs no advice, and
+        // a language forge has no server for must not invent one — a hint the
+        // model can never satisfy is worse than silence.
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("a.rs"), "pub fn thing() {}\n").expect("write");
+        let with_lsp =
+            lookup_symbol_with_lsp_state("thing", dir.path(), Some("/usr/bin/ra")).expect("lookup");
+        assert!(
+            with_lsp.lsp_advice.is_none(),
+            "an answering LSP needs no advice"
+        );
+
+        let odd = tempfile::tempdir().expect("temp dir");
+        std::fs::write(odd.path().join("a.zig"), "pub fn thing() {}\n").expect("write");
+        let unknown = lookup_symbol_with_lsp_state("thing", odd.path(), None)
+            .expect("lookup for a language with no known server");
+        assert!(
+            unknown.lsp_advice.is_none(),
+            "no known server means no install advice"
+        );
+    }
+
+    #[test]
+    fn a_match_still_answers_when_advice_is_present() {
+        // Advice rides *beside* the answer, never instead of it: a model told
+        // to install a server still needs the file and line it asked for.
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("a.rs"), "pub fn thing() {}\n").expect("write");
+        let result = lookup_symbol_with_lsp_state("thing", dir.path(), None).expect("lookup");
+        assert!(!result.matches.is_empty(), "the walk must still answer");
+        assert!(result.lsp_advice.is_some(), "and the advice is beside it");
     }
 
     #[test]

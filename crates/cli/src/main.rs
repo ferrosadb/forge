@@ -2109,8 +2109,18 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
                 .ok_or("Missing required parameter: name")?;
             let dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             let path = std::path::PathBuf::from(dir);
-            let result =
-                forge_digest::lookup::lookup_symbol(name, &path).map_err(|e| e.to_string())?;
+            // Resolve the language server once so the answer can say how to
+            // get one when it had to fall back to the source walk
+            // (ingest prints its install prompt to stderr, where no model
+            // reads it).
+            let lsp_path = forge_digest::lookup::dominant_language(&path)
+                .and_then(|lang| forge_ingest::lsp::find_lsp(&lang));
+            let result = forge_digest::lookup::lookup_symbol_with_lsp_state(
+                name,
+                &path,
+                lsp_path.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         }
     );
