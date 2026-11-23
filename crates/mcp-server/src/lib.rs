@@ -696,14 +696,14 @@ impl McpServer {
                     Err(error) => json_error_with_data(id, error.code, &error.message, error.data),
                 }
             }
-            "tools/list" => self.respond_tools_list(id),
+            "tools/list" => self.respond_tools_list_legacy(id),
             "tools/call" if body_protocol_version(params).is_some() => {
                 match validate_modern_stdio_request(Some(&id), params) {
                     Ok(()) => self.respond_tools_call(id, params),
                     Err(error) => json_error_with_data(id, error.code, &error.message, error.data),
                 }
             }
-            "tools/call" => self.respond_tools_call(id, params),
+            "tools/call" => self.respond_tools_call_legacy(id, params),
             _ => {
                 eprintln!("[mcp-server] unknown method: {method}");
                 json_error(id, -32601, "Method not found")
@@ -714,8 +714,8 @@ impl McpServer {
     fn handle_modern_request(&self, id: Value, method: &str, params: &Value) -> Value {
         match method {
             "server/discover" => self.respond_server_discover(id),
-            "tools/list" => self.respond_tools_list(id),
-            "tools/call" => self.respond_tools_call(id, params),
+            "tools/list" => self.respond_tools_list_legacy(id),
+            "tools/call" => self.respond_tools_call_legacy(id, params),
             _ => {
                 eprintln!("[mcp-server] unknown modern method: {method}");
                 json_error(id, -32601, "Method not found")
@@ -835,6 +835,34 @@ impl McpServer {
                 "serverInfo": self.server_identity()
             }
         })
+    }
+
+    /// `tools/list` for a client that negotiated the **legacy** version.
+    ///
+    /// `2024-11-05` defines the result as `{ tools }` and nothing else:
+    /// `resultType`, `ttlMs`, `cacheScope` and a result-side `_meta` are draft
+    /// (`2026-07-28`) additions. A legacy client that receives them is being
+    /// served a shape for a version it never agreed to — so the tool set is
+    /// identical to the modern path's, and only the envelope differs.
+    fn respond_tools_list_legacy(&self, id: Value) -> Value {
+        let defs = self.tool_defs_visible(&self.detected_stacks);
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "tools": defs }
+        })
+    }
+
+    /// `tools/call` for a client that negotiated the **legacy** version: the
+    /// result is `{ content, isError? }`, with no draft envelope.
+    fn respond_tools_call_legacy(&self, id: Value, params: &Value) -> Value {
+        let mut resp = self.respond_tools_call(id, params);
+        if let Some(result) = resp.get_mut("result").and_then(|r| r.as_object_mut()) {
+            for draft_only in ["resultType", "ttlMs", "cacheScope", "_meta"] {
+                result.remove(draft_only);
+            }
+        }
+        resp
     }
 
     fn respond_tools_list(&self, id: Value) -> Value {
@@ -1619,7 +1647,7 @@ mod tests {
         add_failing_tool(&mut server);
         assert_eq!(server.tools.len(), 2);
 
-        // tools/list response
+        // tools/list on the MODERN path: the draft's result envelope rides.
         let resp = server.respond_tools_list(json!(1));
         let tools = &resp["result"]["tools"];
         assert!(tools.is_array());
@@ -1629,6 +1657,61 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["name"], "echo");
         assert_eq!(arr[1]["name"], "fail");
+    }
+
+    #[test]
+    fn a_legacy_tools_list_carries_no_draft_envelope() {
+        // The server answers `initialize` with the LEGACY version
+        // (`2024-11-05`). A client that negotiated that version must get a
+        // legacy-shaped result: `resultType`, `ttlMs` and `cacheScope` are
+        // draft-2026-07-28 fields, and `_meta` on a *result* is a draft
+        // concept too. Emitting them to a legacy client is the mismatch
+        // between advertised and served protocol.
+        let server = make_server();
+        // Through the real dispatch: a legacy client sends no request `_meta`,
+        // so `handle_request` takes the legacy arm. Testing the arm directly
+        // would pass even if the dispatch were wired to the modern responder.
+        let resp = server.handle_request(json!(1), "tools/list", &json!({}));
+        let result = &resp["result"];
+        assert!(result["tools"].is_array(), "tools must still be served");
+        for draft_only in ["resultType", "ttlMs", "cacheScope", "_meta"] {
+            assert!(
+                result.get(draft_only).is_none(),
+                "legacy tools/list leaked the draft field {draft_only}: {resp}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_legacy_tool_result_carries_no_draft_envelope() {
+        // Same rule for `tools/call`: a legacy client reads `content` and
+        // `isError`, not the draft's `resultType`.
+        let mut server = make_server();
+        add_echo_tool(&mut server);
+        let params = json!({"name": "echo", "arguments": {"text": "hi"}});
+        let resp = server.handle_request(json!(1), "tools/call", &params);
+        let result = &resp["result"];
+        assert!(result["content"].is_array());
+        assert_eq!(result["isError"], false);
+        for draft_only in ["resultType", "ttlMs", "cacheScope", "_meta"] {
+            assert!(
+                result.get(draft_only).is_none(),
+                "legacy tools/call leaked the draft field {draft_only}: {resp}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_paths_serve_the_same_tools() {
+        // The envelopes differ; the tool set must not. A legacy client that
+        // silently saw fewer tools would be a worse failure than the leak.
+        let server = make_server();
+        let modern = server.respond_tools_list(json!(1));
+        let legacy = server.respond_tools_list_legacy(json!(1));
+        assert_eq!(
+            modern["result"]["tools"], legacy["result"]["tools"],
+            "the advertised tool set must be identical on both paths"
+        );
     }
 
     #[test]
