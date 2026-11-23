@@ -59,7 +59,8 @@ fn sheet_tools_appear_in_tools_list() {
         .as_array()
         .expect("tools should be an array");
 
-    for name in ["sheet_auth", "sheet_pull", "sheet_push"] {
+    // Advertised under the `frg_` alias (see mcp-server TOOL_ALIAS).
+    for name in ["frg_sheet_auth", "frg_sheet_pull", "frg_sheet_push"] {
         let tool = tools.iter().find(|t| t["name"] == name);
         assert!(tool.is_some(), "{name} tool must appear in tools/list");
         assert_eq!(
@@ -69,11 +70,17 @@ fn sheet_tools_appear_in_tools_list() {
         );
     }
 
-    let pull_schema = &tools.iter().find(|t| t["name"] == "sheet_pull").unwrap()["inputSchema"];
+    let pull_schema = &tools
+        .iter()
+        .find(|t| t["name"] == "frg_sheet_pull")
+        .unwrap()["inputSchema"];
     assert!(pull_schema["properties"].get("dry_run").is_some());
     assert!(pull_schema["properties"].get("cql_host").is_some());
 
-    let push_schema = &tools.iter().find(|t| t["name"] == "sheet_push").unwrap()["inputSchema"];
+    let push_schema = &tools
+        .iter()
+        .find(|t| t["name"] == "frg_sheet_push")
+        .unwrap()["inputSchema"];
     assert!(push_schema["properties"].get("row_id").is_some());
     assert!(push_schema["properties"].get("status").is_some());
     assert!(push_schema["properties"].get("fix_ver").is_some());

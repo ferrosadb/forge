@@ -67,7 +67,8 @@ fn glob_tool_rejects_parent_escape() {
 fn glob_tool_appears_in_list() {
     let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
     let out = send_rpc(req);
-    assert!(out.contains("\"name\":\"glob\""), "got: {out}");
+    // Advertised under the `frg_` alias (see mcp-server TOOL_ALIAS).
+    assert!(out.contains("\"name\":\"frg_glob\""), "got: {out}");
     // Verify read-only annotation survives the wire format.
     assert!(out.contains("\"readOnly\":true"), "got: {out}");
 }
