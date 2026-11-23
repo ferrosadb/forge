@@ -3449,7 +3449,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
 
     // task_update
     register_tool!(server, "task_update",
-        "Update fields of an existing task. Only provided fields are changed. Returns the updated Task as JSON.",
+        "Update fields of an existing task — status, priority, assignee, body, summary, result. Only the fields you pass change, so this is safe for a partial edit. Use it to move work across the board or record an outcome; returns the updated task as JSON.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3494,7 +3494,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
     register_tool!(
         server,
         "task_get",
-        "Get a task by ID, including its parent/child links and recent comments.",
+        "Get one task by ID with its full body, its parent and child links, and its most recent comments. Use this before updating or commenting, so the change is made against what the task actually says now. Returns the full task as JSON.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3601,7 +3601,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
     register_tool!(
         server,
         "task_link",
-        "Create a parent→child relationship between two tasks.",
+        "Create a parent→child relationship between two tasks, so the child is tracked as part of the parent's work. Use this to decompose a task before starting it. Returns the updated child pointing at its parent.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3641,7 +3641,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
     register_tool!(
         server,
         "task_unlink",
-        "Remove the parent→child relationship between two tasks.",
+        "Remove the parent→child relationship between two tasks when the child no longer belongs to that parent — it was moved, split out, or should stand on its own. Returns the updated child with the link cleared.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3681,7 +3681,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
     register_tool!(
         server,
         "task_comment",
-        "Add a comment to a task.",
+        "Add a comment to a task. Use this to record a decision, a blocker, or the reason work stopped, so the next reader of the task sees it without asking. Returns the created comment with its author and timestamp.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -3720,7 +3720,7 @@ fn build_mcp_server() -> anyhow::Result<forge_mcp_server::McpServer> {
 
     // task_board
     register_tool!(server, "task_board",
-        "Return the kanban board with tasks grouped into columns: triage, ready, in_progress, blocked, complete.",
+        "Return the kanban board with tasks grouped into columns: triage, ready, in_progress, blocked, complete. Use this to see what is in flight and what is ready before starting work, rather than listing every task. Returns the board as JSON, grouped by column.",
         serde_json::json!({
             "type": "object",
             "properties": {
