@@ -33,6 +33,37 @@ pub struct SymbolMatch {
 /// Otherwise, scans all files using digest and returns matches with
 /// ready-to-use excerpt commands.
 pub fn lookup_symbol(symbol: &str, dir: &Path) -> anyhow::Result<LookupResult> {
+    // Race the language server against the source walk and take whichever
+    // answers first. The LSP is capped short by design (`rust_lsp`), so this
+    // can only ever be faster than the walk alone — a cold or wedged
+    // rust-analyzer bows out and the walker's answer stands.
+    let (lsp_tx, lsp_rx) = std::sync::mpsc::channel();
+    {
+        let symbol = symbol.to_string();
+        let dir = dir.to_path_buf();
+        std::thread::spawn(move || {
+            let found = crate::rust_lsp::workspace_symbols(&symbol, &dir)
+                .ok()
+                .flatten()
+                .filter(|matches| !matches.is_empty());
+            let _ = lsp_tx.send(found);
+        });
+    }
+
+    let walked = walk_symbol(symbol, dir)?;
+    // The walk is the floor: it is already finished, so an LSP answer that has
+    // not arrived yet adds nothing but latency.
+    if let Ok(Some(matches)) = lsp_rx.try_recv() {
+        return Ok(LookupResult {
+            method: "lsp".to_string(),
+            matches,
+        });
+    }
+    Ok(walked)
+}
+
+/// The source-walk half of [`lookup_symbol`].
+fn walk_symbol(symbol: &str, dir: &Path) -> anyhow::Result<LookupResult> {
     let mut matches = Vec::new();
 
     // Walk source files

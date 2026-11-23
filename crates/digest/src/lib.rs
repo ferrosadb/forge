@@ -6,4 +6,5 @@
 
 pub mod excerpt;
 pub mod lookup;
+pub mod rust_lsp;
 pub mod summarizer;
