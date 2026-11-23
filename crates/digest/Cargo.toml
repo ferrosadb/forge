@@ -12,3 +12,6 @@ anyhow = { workspace = true }
 ignore = { workspace = true }
 dirs = { workspace = true }
 forge-shared = { path = "../shared" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

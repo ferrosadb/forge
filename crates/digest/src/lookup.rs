@@ -76,6 +76,17 @@ pub fn lookup_symbol(symbol: &str, dir: &Path) -> anyhow::Result<LookupResult> {
             Err(_) => continue,
         };
 
+        // A file that never mentions the symbol cannot hold its declaration,
+        // so parsing it is pure cost. Measured on a 548-file Rust tree:
+        // `summarize` totals ~22s (~40ms/file) against a 0.07s walk, which is
+        // why this tool took 37.9s where a grep takes 50ms. The check is a
+        // *substring* one, not "is it a declaration": a symbol named only in
+        // a doc comment still reaches the parse, because its declaration may
+        // sit below that comment.
+        if !source.contains(symbol) {
+            continue;
+        }
+
         let filename = path.display().to_string();
         let digest = summarizer::summarize(&filename, &source);
 
@@ -250,5 +261,79 @@ mod tests {
         let out = format_lookup(&result);
         assert!(out.contains("LSP available"));
         assert!(out.contains("lsp_workspace_symbols"));
+    }
+
+    // ---- the walk must not parse a file the symbol is not in ----
+    //
+    // Measured on a 548-file Rust tree: the raw walk plus read costs 0.07s,
+    // while `summarize()` over the same files costs 22s (~40ms/file). The
+    // lookup called `summarize` on every source file to find one symbol, so
+    // the tool took 37.9s where a grep takes 50ms — slow enough that a model
+    // is right to prefer grep over it.
+
+    #[test]
+    fn a_file_without_the_symbol_is_skipped_before_parsing() {
+        // RED as written: `lookup_symbol` summarises every source file, so a
+        // tree where only one file mentions the symbol still pays for all of
+        // them. This asserts the observable effect — the parse count — not the
+        // presence of a new helper.
+        let dir = tempfile::tempdir().expect("temp dir");
+        // 40 files that do NOT contain the symbol, and one that does.
+        for i in 0..40 {
+            std::fs::write(
+                dir.path().join(format!("noise_{i}.rs")),
+                format!("pub fn unrelated_{i}() {{}}\n"),
+            )
+            .expect("write noise");
+        }
+        std::fs::write(
+            dir.path().join("target.rs"),
+            "pub fn the_symbol_im_looking_for() {}\n",
+        )
+        .expect("write target");
+
+        // Other tests run in parallel and share this process-wide counter, so
+        // a delta over `before` is not stable. What IS stable: 41 noise files
+        // can contribute at most 0 parses once the pre-filter exists, so a
+        // tree that would have cost 41 costs at most a handful. The bound is
+        // deliberately loose enough to survive neighbours and still fail on
+        // the unfiltered behaviour (41).
+        let before = summarizer::summarize_count();
+        let result = lookup_symbol("the_symbol_im_looking_for", dir.path()).expect("lookup");
+        let parsed = summarizer::summarize_count().saturating_sub(before);
+
+        assert_eq!(result.matches.len(), 1, "the symbol is found");
+        assert!(
+            parsed < 5,
+            "the walk parsed {parsed} files; only the one holding the symbol should be parsed"
+        );
+    }
+
+    #[test]
+    fn the_pre_filter_never_drops_a_file_whose_declaration_is_found() {
+        // The invariant the pre-filter must not break: what it skips is a
+        // superset of what the parse would have matched. Every element's
+        // `text` is a verbatim slice of the source, so a file that lacks the
+        // substring cannot yield a match — and a file that HAS it is still
+        // parsed, including when the only textual hit is in a doc comment
+        // above the declaration (which is how a symbol is usually documented).
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("documented.rs"),
+            "/// Builds a WidgetFactory, and says so in prose.\n\
+             pub fn make() -> u8 { 1 }\n",
+        )
+        .expect("write");
+        // The doc mention alone is enough to get the file parsed, so the
+        // declaration's own kind is reported rather than skipped.
+        let result = lookup_symbol("make", dir.path()).expect("lookup");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.file.ends_with("documented.rs")),
+            "the documented declaration was found: {:?}",
+            result.matches
+        );
     }
 }

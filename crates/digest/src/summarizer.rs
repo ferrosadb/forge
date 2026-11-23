@@ -57,7 +57,20 @@ pub enum ElementKind {
 }
 
 /// Summarize a source file into a structural digest.
+///
+/// How many files this process has summarised — the instrument the lookup's
+/// parse-count test reads. A counter, not a timer: it is deterministic, so the
+/// assertion cannot flake on a loaded machine.
+static SUMMARIZE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Files summarised so far in this process (test instrument).
+#[must_use]
+pub fn summarize_count() -> usize {
+    SUMMARIZE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn summarize(filename: &str, source: &str) -> FileDigest {
+    SUMMARIZE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let lines: Vec<&str> = source.lines().collect();
     let total_lines = lines.len();
     let lang = detect_language(filename);
