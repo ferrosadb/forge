@@ -58,19 +58,28 @@ pub enum ElementKind {
 
 /// Summarize a source file into a structural digest.
 ///
-/// How many files this process has summarised — the instrument the lookup's
-/// parse-count test reads. A counter, not a timer: it is deterministic, so the
-/// assertion cannot flake on a loaded machine.
-static SUMMARIZE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How many files **this thread** has summarised — the instrument the lookup's
+/// parse-count test reads.
+///
+/// Thread-local, not process-wide: cargo runs tests concurrently in one
+/// process, so a process-wide counter makes any delta schedule-dependent (the
+/// assertion passed alone and failed in the suite). A thread-local one counts
+/// only the parses the test's own call made.
+///
+/// A counter, not a timer: it is exact, so the assertion cannot flake on a
+/// loaded machine.
+thread_local! {
+    static SUMMARIZE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-/// Files summarised so far in this process (test instrument).
+/// Files this thread has summarised so far (test instrument).
 #[must_use]
 pub fn summarize_count() -> usize {
-    SUMMARIZE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+    SUMMARIZE_COUNT.with(std::cell::Cell::get)
 }
 
 pub fn summarize(filename: &str, source: &str) -> FileDigest {
-    SUMMARIZE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    SUMMARIZE_COUNT.with(|c| c.set(c.get() + 1));
     let lines: Vec<&str> = source.lines().collect();
     let total_lines = lines.len();
     let lang = detect_language(filename);

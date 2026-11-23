@@ -1,8 +1,8 @@
-//! Symbol lookup with LSP detection and fallback.
+//! Symbol lookup: find where a symbol is declared, in this project.
 //!
-//! Provides `frg lookup <symbol>` — detects if oh-my-claudecode's LSP MCP
-//! tools are available. If yes, suggests using them. Otherwise, falls back to
-//! grep-based symbol search across files + excerpt extraction.
+//! `frg lookup <symbol>` scans the project's own source files and returns each
+//! declaration with a ready-to-run `frg excerpt` command. Forge answers with
+//! its own tools — it never points at another server's namespace.
 
 use std::path::Path;
 
@@ -14,7 +14,6 @@ use crate::summarizer::{self, ElementKind};
 #[derive(Debug, Serialize)]
 pub struct LookupResult {
     pub method: String,
-    pub lsp_available: bool,
     pub matches: Vec<SymbolMatch>,
 }
 
@@ -28,30 +27,12 @@ pub struct SymbolMatch {
     pub excerpt_command: String,
 }
 
-/// Check if oh-my-claudecode LSP MCP tools are likely available.
-/// Looks for the plugin in ~/.claude/settings.json.
-pub fn lsp_available() -> bool {
-    let settings_path = dirs::home_dir()
-        .map(|h| h.join(".claude").join("settings.json"))
-        .unwrap_or_default();
-
-    if !settings_path.exists() {
-        return false;
-    }
-
-    std::fs::read_to_string(&settings_path)
-        .map(|content| content.contains("oh-my-claudecode"))
-        .unwrap_or(false)
-}
-
 /// Look up a symbol across all source files in a directory.
 ///
 /// If LSP is available, returns a suggestion to use LSP tools.
 /// Otherwise, scans all files using digest and returns matches with
 /// ready-to-use excerpt commands.
 pub fn lookup_symbol(symbol: &str, dir: &Path) -> anyhow::Result<LookupResult> {
-    let has_lsp = lsp_available();
-
     let mut matches = Vec::new();
 
     // Walk source files
@@ -125,12 +106,7 @@ pub fn lookup_symbol(symbol: &str, dir: &Path) -> anyhow::Result<LookupResult> {
     }
 
     Ok(LookupResult {
-        method: if has_lsp {
-            "lsp_hint".to_string()
-        } else {
-            "grep".to_string()
-        },
-        lsp_available: has_lsp,
+        method: "grep".to_string(),
         matches,
     })
 }
@@ -138,12 +114,6 @@ pub fn lookup_symbol(symbol: &str, dir: &Path) -> anyhow::Result<LookupResult> {
 /// Format lookup results for human/LLM consumption.
 pub fn format_lookup(result: &LookupResult) -> String {
     let mut out = String::new();
-
-    if result.lsp_available {
-        out.push_str("LSP available — for precise results, use:\n");
-        out.push_str("  mcp__plugin_oh-my-claudecode_t__lsp_workspace_symbols\n");
-        out.push_str("  mcp__plugin_oh-my-claudecode_t__lsp_goto_definition\n\n");
-    }
 
     if result.matches.is_empty() {
         out.push_str("No matches found.\n");
@@ -224,7 +194,6 @@ mod tests {
     fn format_lookup_empty_results() {
         let result = LookupResult {
             method: "grep".to_string(),
-            lsp_available: false,
             matches: vec![],
         };
         let out = format_lookup(&result);
@@ -235,7 +204,6 @@ mod tests {
     fn format_lookup_with_matches() {
         let result = LookupResult {
             method: "grep".to_string(),
-            lsp_available: false,
             matches: vec![SymbolMatch {
                 file: "src/main.rs".to_string(),
                 line: 42,
@@ -251,18 +219,6 @@ mod tests {
         assert!(out.contains("process_data"));
     }
 
-    #[test]
-    fn format_lookup_with_lsp_hint() {
-        let result = LookupResult {
-            method: "lsp_hint".to_string(),
-            lsp_available: true,
-            matches: vec![],
-        };
-        let out = format_lookup(&result);
-        assert!(out.contains("LSP available"));
-        assert!(out.contains("lsp_workspace_symbols"));
-    }
-
     // ---- the walk must not parse a file the symbol is not in ----
     //
     // Measured on a 548-file Rust tree: the raw walk plus read costs 0.07s,
@@ -275,10 +231,15 @@ mod tests {
     fn a_file_without_the_symbol_is_skipped_before_parsing() {
         // RED as written: `lookup_symbol` summarises every source file, so a
         // tree where only one file mentions the symbol still pays for all of
-        // them. This asserts the observable effect — the parse count — not the
-        // presence of a new helper.
+        // them.
+        //
+        // The assertion is on the RESULT, not on a shared counter: sibling
+        // tests parse concurrently in this process, so any delta over a
+        // process-wide counter is schedule-dependent and flakes (measured:
+        // passes alone, fails in the suite). What is deterministic is that a
+        // file with no textual mention cannot contribute a match, so the
+        // result may only ever name the file that has one.
         let dir = tempfile::tempdir().expect("temp dir");
-        // 40 files that do NOT contain the symbol, and one that does.
         for i in 0..40 {
             std::fs::write(
                 dir.path().join(format!("noise_{i}.rs")),
@@ -292,20 +253,19 @@ mod tests {
         )
         .expect("write target");
 
-        // Other tests run in parallel and share this process-wide counter, so
-        // a delta over `before` is not stable. What IS stable: 41 noise files
-        // can contribute at most 0 parses once the pre-filter exists, so a
-        // tree that would have cost 41 costs at most a handful. The bound is
-        // deliberately loose enough to survive neighbours and still fail on
-        // the unfiltered behaviour (41).
         let before = summarizer::summarize_count();
         let result = lookup_symbol("the_symbol_im_looking_for", dir.path()).expect("lookup");
-        let parsed = summarizer::summarize_count().saturating_sub(before);
+        let parsed = summarizer::summarize_count() - before;
 
-        assert_eq!(result.matches.len(), 1, "the symbol is found");
+        assert_eq!(result.matches.len(), 1, "exactly one declaration matches");
+        assert_eq!(
+            parsed, 1,
+            "only the file holding the symbol may be parsed, of 41"
+        );
         assert!(
-            parsed < 5,
-            "the walk parsed {parsed} files; only the one holding the symbol should be parsed"
+            result.matches[0].file.ends_with("target.rs"),
+            "the match is the file holding the symbol: {:?}",
+            result.matches[0].file
         );
     }
 
@@ -334,6 +294,60 @@ mod tests {
                 .any(|m| m.file.ends_with("documented.rs")),
             "the documented declaration was found: {:?}",
             result.matches
+        );
+    }
+
+    // ---- forge does its own lookup; it never advertises another server ----
+    //
+    // The lookup used to read ~/.claude/settings.json for the substring
+    // "oh-my-claudecode" and, on a hit, print a suggestion to call
+    // `mcp__plugin_oh-my-claudecode_t__lsp_workspace_symbols`. That name is
+    // another product's namespace: under alter-zero the substring is never
+    // present, so the branch was dead, and the tool a model saw was a name it
+    // could not call. Forge's answer is its own.
+
+    #[test]
+    fn the_renderer_never_emits_a_foreign_tool_even_if_a_result_says_lsp() {
+        // The guard must be reachable whatever a caller passes. A result
+        // claiming `lsp_available: true` is exactly what the deleted
+        // settings.json branch produced, so feeding it directly is the only
+        // way to reach the code the fix removes.
+        let result = LookupResult {
+            method: "lsp_hint".to_string(),
+            matches: vec![],
+        };
+        let rendered = format_lookup(&result);
+        assert!(
+            !rendered.contains("oh-my-claudecode") && !rendered.contains("mcp__plugin_"),
+            "a foreign tool namespace reached the answer: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_lookup_never_names_another_products_tool() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("a.rs"), "pub fn thing() {}\n").expect("write");
+        let result = lookup_symbol("thing", dir.path()).expect("lookup");
+        let rendered = format_lookup(&result);
+        assert!(
+            !rendered.contains("oh-my-claudecode"),
+            "the answer advertises a foreign server: {rendered}"
+        );
+        assert!(
+            !rendered.contains("mcp__plugin_"),
+            "the answer names a foreign tool namespace: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_lookup_reports_only_the_methods_forge_itself_runs() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("a.rs"), "pub fn thing() {}\n").expect("write");
+        let result = lookup_symbol("thing", dir.path()).expect("lookup");
+        assert!(
+            result.method == "grep" || result.method == "lsp",
+            "method must name something forge runs, got {:?}",
+            result.method
         );
     }
 }
