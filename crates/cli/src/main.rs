@@ -224,7 +224,7 @@ enum Commands {
         #[arg(long)]
         list_filters: bool,
         /// The command and arguments to run
-        #[arg(required = true, trailing_var_arg = true)]
+        #[arg(required_unless_present = "list_filters", trailing_var_arg = true)]
         args: Vec<String>,
     },
 
