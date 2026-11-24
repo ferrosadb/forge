@@ -57,4 +57,6 @@ toml = { workspace = true }
 globset = "0.4"
 csv = "1"
 tempfile = { workspace = true }
+sha2 = "0.11"
+toml_edit = "0.22"
 

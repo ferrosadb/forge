@@ -15,6 +15,8 @@ mod fmem_skill_ingest;
 mod glob;
 mod harness_files;
 mod plugin_cmd;
+mod plugin_migrate;
+mod plugin_stage;
 
 use fmem_skill_ingest::run_fmem_skill_ingest;
 
@@ -23,25 +25,38 @@ use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
 enum PluginAction {
-    /// Register the local marketplace and install the forge plugin with the
+    /// Stage forge into the shared `ferrosa` marketplace, install it with the
     /// harness's own plugin CLI, verify its MCP server answers, then remove
-    /// the hook entries `frg init --global` wrote (backed up, undoable)
+    /// legacy forge entries (exact matches only, backed up, undoable)
     Install {
         /// Harness to install into
         #[arg(long, value_enum)]
         harness: plugin_cmd::Harness,
-        /// Marketplace directory holding forge/ (default: `~/.ferrosa/plugins/<version>/forge`)
+        /// Marketplace root (default: `~/.ferrosa/plugins/current`)
         #[arg(long)]
         plugin_root: Option<PathBuf>,
-        /// Leave the legacy `frg init --global` hook entries in place
+        /// Leave legacy forge entries in place
         #[arg(long)]
         no_migrate: bool,
-    },
-    /// Undo a migration: put back the entries it removed
-    Migrate {
-        /// Backup timestamp printed by the migration (`~/.ferrosa/backups/harness/<ts>`)
+        /// Print the report as JSON (the shape `fmem harness plugin install --json` uses)
         #[arg(long)]
-        undo: String,
+        json: bool,
+    },
+    /// Remove legacy forge entries once the plugin verifies, or undo a migration
+    Migrate {
+        /// Harness to migrate (required unless --undo)
+        #[arg(long, value_enum, required_unless_present = "undo")]
+        harness: Option<plugin_cmd::Harness>,
+        /// List what would be removed and write nothing
+        #[arg(long, conflicts_with = "undo")]
+        dry_run: bool,
+        /// Put back what the migration with this backup timestamp removed
+        /// (`~/.ferrosa/backups/harness/<ts>`)
+        #[arg(long)]
+        undo: Option<String>,
+        /// Print the report as JSON (the shape `fmem harness migrate --json` uses)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1500,6 +1515,51 @@ fn track_run_outcome(o: &RunOutcome) {
     })();
     if let Err(e) = outcome {
         eprintln!("frg: tracking disabled: {e}");
+    }
+}
+
+/// `frg plugin ...`; returns false when the run must exit non-zero.
+fn run_plugin(home: &Path, action: PluginAction) -> anyhow::Result<bool> {
+    let empty_errors = |v: &serde_json::Value| v["errors"].as_array().is_none_or(Vec::is_empty);
+    match action {
+        PluginAction::Install {
+            harness,
+            plugin_root,
+            no_migrate,
+            json,
+        } => {
+            let (report, ok) = plugin_cmd::install(home, harness, plugin_root, !no_migrate);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!([report]))?
+                );
+            } else {
+                print!("{}", plugin_cmd::describe_install(&report));
+                if let Some(e) = report["error"].as_str() {
+                    eprintln!("frg plugin install: {e}");
+                }
+            }
+            Ok(ok && report["status"] != "failed")
+        }
+        PluginAction::Migrate {
+            harness,
+            dry_run,
+            undo,
+            json,
+        } => {
+            let report = match (undo, harness) {
+                (Some(stamp), _) => plugin_migrate::undo(home, &stamp)?,
+                (None, Some(harness)) => plugin_cmd::migrate(home, harness, dry_run)?,
+                (None, None) => anyhow::bail!("pass --harness or --undo"),
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", plugin_cmd::describe_migration(&report));
+            }
+            Ok(empty_errors(&report))
+        }
     }
 }
 
@@ -5363,15 +5423,10 @@ fn main() -> anyhow::Result<()> {
         Commands::Plugin { action } => {
             let home = dirs::home_dir()
                 .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-            let report = match action {
-                PluginAction::Install {
-                    harness,
-                    plugin_root,
-                    no_migrate,
-                } => plugin_cmd::install(&home, harness, plugin_root, !no_migrate)?,
-                PluginAction::Migrate { undo } => plugin_cmd::undo(&home, &undo)?,
-            };
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            let ok = run_plugin(&home, action)?;
+            if !ok {
+                std::process::exit(1);
+            }
         }
 
         Commands::Discover { dir } => {

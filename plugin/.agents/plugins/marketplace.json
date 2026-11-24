@@ -1,7 +1,7 @@
 {
-  "name": "forge",
+  "name": "ferrosa",
   "interface": {
-    "displayName": "Forge"
+    "displayName": "Ferrosa (installed on this machine)"
   },
   "plugins": [
     {

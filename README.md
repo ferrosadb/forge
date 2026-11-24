@@ -93,32 +93,50 @@ skill-discovery settings.
 
 ### As a plugin (Claude Code and Codex)
 
-[`plugin/`](plugin) is a local plugin marketplace named `forge` holding the
-`forge` plugin: the `frg --mcp` server, started through
-`scripts/frg-mcp` (which runs the installed `frg` and exits 127 with
-instructions when there is none), and for Claude Code the same two `Read`
-hooks `frg init --global` installs. Codex gets the MCP server and no hooks.
+The `forge` plugin carries the `frg --mcp` server and, for Claude Code, the
+same two `Read` hooks `frg init --global` installs. The server starts through
+`scripts/frg-mcp`, which runs the installed `frg` and exits 127 with
+instructions when there is none. Codex gets the MCP server and no hooks. The
+source is [`plugin/forge`](plugin/forge), and `frg` embeds it.
 
 ```sh
-frg plugin install --harness claude-code --plugin-root path/to/forge/plugin
-frg plugin install --harness codex --plugin-root path/to/forge/plugin
+frg plugin install --harness claude-code [--json]
+frg plugin install --harness codex [--json]
 ```
 
-This registers the marketplace and installs the plugin with the harness's own
-CLI (`claude plugin ...`, `codex plugin ...`), then checks that the plugin is
-enabled at the marketplace's version and that its MCP server answers. Running
-it again changes nothing. Without `--plugin-root` it uses
-`~/.ferrosa/plugins/<frg version>/forge`, where the Ferrosa installer puts the
-tree. A marketplace already named `forge` at another path is left alone and
-reported.
+The plugin lives in the shared local marketplace `ferrosa`, which also lists
+fmem's `ferrosa-memory`. Its root defaults to `~/.ferrosa/plugins/current/`,
+which the Ferrosa installer creates; pass `--plugin-root DIR` for another one.
+`frg plugin install`:
 
-Once the plugin verifies, the hook entries `frg init --global` wrote are
-removed from `~/.claude/settings.json`: only exact matches, after a backup to
-`~/.ferrosa/backups/harness/<timestamp>/`, recorded in that directory's
-`report.json`. `frg plugin migrate --undo <timestamp>` puts them back. Pass
-`--no-migrate` to keep them. A `forge` MCP server another installer registered
-(`~/.claude.json`, `~/.mcp.json`, `~/.codex/config.toml`) is not removed; the
-report lists it with the command that removes it.
+1. Writes `forge/` under the root and adds forge's entry to the root's two
+   marketplace manifests by exact identity. It adds the entry when absent,
+   leaves it alone when identical, and refuses an entry named `forge` that
+   differs. Every other entry stays.
+2. Registers the marketplace and installs (or updates) `forge@ferrosa` with
+   the harness's own CLI. A `ferrosa` marketplace registered at another path
+   is reported, not re-pointed.
+3. Checks the plugin is enabled at this frg's version and its MCP server
+   answers `initialize`. Running it again changes nothing.
+4. Only then removes legacy forge entries (`--no-migrate` keeps them). An
+   entry goes only when it is exactly one of the shapes below, and only after
+   its whole file is backed up to `~/.ferrosa/backups/harness/<timestamp>/`
+   with a `report.json`. Anything else that looks like forge's is left alone
+   and reported with the manual change.
+
+| Signature | Entry | Written by |
+|---|---|---|
+| `frg-init-hook-PreToolUse-Read`, `frg-init-hook-PostToolUse-Read`, `frg-init-hook-PostToolUse-Bash` | `~/.claude/settings.json` hook entries running `frg hook 2>/dev/null \|\| true` | `frg init --global` |
+| `claude-json-mcp-coordinator-forge` | `~/.claude.json` `mcpServers.forge` = `{"type":"stdio","command":"~/.ferrosa/bin/frg","args":["--mcp"]}` | ferrosa-coordinator |
+| `codex-toml-mcp-coordinator-forge` | `~/.codex/config.toml` `[mcp_servers.forge]` with `command = "~/.ferrosa/bin/frg"`, `args = ["--mcp"]` | ferrosa-coordinator |
+
+`frg plugin migrate --harness H [--dry-run] [--json]` runs step 4 alone, after
+verifying the plugin. `frg plugin migrate --undo <timestamp> [--json]`
+restores each file the migration wrote, provided it has not changed since. An
+edited `settings.json` gets the removed entries re-added instead. Any other
+file that changed stops the undo before anything is written. `--json` prints
+the report shapes `fmem harness plugin install --json` and `fmem harness
+migrate --json` use, with `"tool": "frg"`.
 
 ### Uninstall
 
