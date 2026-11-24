@@ -55,7 +55,8 @@ fn ingest_tool_appears_in_tools_list() {
         .as_array()
         .expect("tools should be an array");
 
-    let ingest = tools.iter().find(|t| t["name"] == "ingest");
+    // Advertised under the `frg_` alias (see mcp-server TOOL_ALIAS).
+    let ingest = tools.iter().find(|t| t["name"] == "frg_ingest");
     assert!(ingest.is_some(), "ingest tool must appear in tools/list");
 
     let schema = &ingest.unwrap()["inputSchema"];
@@ -69,7 +70,7 @@ fn ingest_tool_appears_in_tools_list() {
     );
 
     // Also verify ingest_url tool is registered
-    let ingest_url = tools.iter().find(|t| t["name"] == "ingest_url");
+    let ingest_url = tools.iter().find(|t| t["name"] == "frg_ingest_url");
     assert!(
         ingest_url.is_some(),
         "ingest_url tool must appear in tools/list"
@@ -94,7 +95,7 @@ fn ingest_tool_appears_in_tools_list() {
         "ingest_url tool should have a 'dry_run' property for extraction-only mode"
     );
 
-    let fetch_url = tools.iter().find(|t| t["name"] == "fetch_url");
+    let fetch_url = tools.iter().find(|t| t["name"] == "frg_fetch");
     assert!(
         fetch_url.is_some(),
         "fetch_url tool must appear in tools/list"
@@ -106,7 +107,7 @@ fn ingest_tool_appears_in_tools_list() {
         "fetch_url tool should have a 'url' property"
     );
 
-    let web_search = tools.iter().find(|t| t["name"] == "web_search");
+    let web_search = tools.iter().find(|t| t["name"] == "frg_web");
     assert!(
         web_search.is_some(),
         "web_search tool must appear in tools/list"
@@ -122,7 +123,7 @@ fn ingest_tool_appears_in_tools_list() {
     );
 
     // ingest_paper has the same persistence contract.
-    let ingest_paper = tools.iter().find(|t| t["name"] == "ingest_paper");
+    let ingest_paper = tools.iter().find(|t| t["name"] == "frg_ingest_paper");
     assert!(
         ingest_paper.is_some(),
         "ingest_paper tool must appear in tools/list"

@@ -30,6 +30,126 @@ const MODERN_RESULT_TTL_MS: u64 = 300_000;
 const MODERN_CACHE_SCOPE: &str = "private";
 const MAX_HTTP_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+/// The prefix every forge tool is advertised under.
+///
+/// Three characters, not a namespace. A harness shows the model
+/// `frg_find_definition` instead of `mcp__forge__find_definition`, and the
+/// stem is still there to say which server answered — the memory server offers
+/// its own `ingest`, `task_get` and `task_list`, so a bare tool name would be
+/// ambiguous across two servers on the same harness.
+///
+/// An underscore, not `.`: OpenAI-shaped APIs cap function names at
+/// `^[a-zA-Z0-9_-]{1,64}$`, and one illegal character fails the whole request.
+/// The dot form (`frg.find_definition`) is the human display spelling.
+pub const TOOL_ALIAS: &str = "frg";
+
+/// The human display form: `frg.find`.
+pub fn display_name(tool: &str) -> String {
+    format!("{TOOL_ALIAS}.{}", short_name(tool))
+}
+
+/// The advertised (wire) name: `frg_find`.
+pub fn wire_name(tool: &str) -> String {
+    format!("{TOOL_ALIAS}_{}", short_name(tool))
+}
+
+/// The longest a tool name may be after the `frg_` prefix.
+///
+/// A name is a verb the model parses before it decides. The budget keeps the
+/// whole wire name inside a screen line (`frg_` + 16) while leaving room for
+/// the words that distinguish one tool from its neighbours.
+pub const MAX_TOOL_NAME_LEN: usize = 16;
+
+/// A tool's advertised name, without the `frg_` prefix.
+///
+/// **Brief, but never cryptic.** The namespace carries identity and the tool
+/// name carries meaning, so every entry keeps the word that tells it apart:
+/// `fail_loud` not `bubble`, `deps_audit` not `vulns`. What gets trimmed is the
+/// boilerplate — the `scan`/`detect`/`summary`/`filter` suffix a noun already
+/// implies — never the distinguishing word.
+///
+/// A tool not in the table is advertised as registered, and the length guard
+/// test fails if a new one arrives over [`MAX_TOOL_NAME_LEN`].
+#[must_use]
+pub fn short_name(tool: &str) -> &str {
+    match tool {
+        // read / navigate
+        "find_definition" => "find",
+        "module_outline" => "outline",
+        "dependency_tree" => "deps",
+        "cognitive_complexity" => "complexity",
+        "materialization_scan" => "materialize",
+        "concurrency_scan" => "concurrency",
+        "fail_loud_scan" => "fail_loud",
+        "api_contract_diff" => "api_diff",
+        "project_detect" => "detect",
+        "project_summary" => "summary",
+        "merge_check" => "merge",
+        "format_fix" => "format",
+        // tasks
+        "task_board" => "board",
+        "task_list" => "tasks",
+        "task_get" => "task",
+        "task_create" => "task_create",
+        "task_update" => "task_update",
+        "task_comment" => "comment",
+        "task_link" => "link",
+        "task_unlink" => "unlink",
+        // ingest / web
+        "ingest_url" => "ingest_url",
+        "ingest_paper" => "ingest_paper",
+        "ingest_corpus" => "corpus",
+        "web_search" => "web",
+        "fetch_url" => "fetch",
+        // output filtering
+        "test_summary" => "tests",
+        "log_distill" => "logs",
+        "log_monitor" => "watch",
+        "diff_filter" => "diff",
+        "lint_dedup" => "lint",
+        "git_summary" => "gitlog",
+        // quality / audit
+        "coverage_gate" => "coverage",
+        "doc_coverage" => "docs",
+        "dead_code" => "dead_code",
+        "smell_detect" => "smells",
+        "secret_scan" => "secrets",
+        "deps_audit" => "deps_audit",
+        "threat_scan" => "threats",
+        "schema_diff" => "schema",
+        // sheets / misc
+        "sheet_auth" => "sheet_auth",
+        "sheet_pull" => "sheet_pull",
+        "sheet_push" => "sheet_push",
+        "checklist_state" => "checklist",
+        "todo_extract" => "todos",
+        "mermaid_validate" => "mermaid",
+        "mcp_probe" => "probe",
+        "fmem_skill_ingest" => "skills",
+        "tool_aliases" => "aliases",
+        other => other,
+    }
+}
+
+/// The tool a client asked for, whichever spelling it used — the advertised
+/// `frg_` form, the human `frg.` form, or the pre-alias bare name.
+///
+/// Accepting all three is what lets the rename land without breaking a
+/// configured harness: a saved permission rule, an agent `tools:` filter or a
+/// live client still naming `mcp__forge__find_definition` keeps working.
+pub fn canonical_tool_name(requested: &str) -> &str {
+    let stripped = requested
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.strip_prefix("forge__"))
+        .or_else(|| requested.strip_prefix("frg_"))
+        .or_else(|| requested.strip_prefix("frg."))
+        .or_else(|| requested.strip_prefix("forge_"))
+        .unwrap_or(requested);
+    // The advertised name is the one word; the LONG name must still resolve, so
+    // a harness configured against the pre-shortening spelling keeps working.
+    stripped
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -540,6 +660,18 @@ impl McpServer {
             .collect()
     }
 
+    /// The definitions as the **model** is shown them: the same set, each name
+    /// under its `frg_` wire name (see [`TOOL_ALIAS`]).
+    pub fn advertised_defs(&self, stacks: &[String]) -> Vec<ToolDef> {
+        self.tool_defs_visible(stacks)
+            .into_iter()
+            .map(|def| ToolDef {
+                name: wire_name(&def.name),
+                ..def.clone()
+            })
+            .collect()
+    }
+
     /// Run the server loop: read JSONL from stdin, write JSONL to stdout.
     pub fn run(&self) -> Result<()> {
         let stdout = io::stdout();
@@ -845,7 +977,7 @@ impl McpServer {
     /// served a shape for a version it never agreed to — so the tool set is
     /// identical to the modern path's, and only the envelope differs.
     fn respond_tools_list_legacy(&self, id: Value) -> Value {
-        let defs = self.tool_defs_visible(&self.detected_stacks);
+        let defs = self.advertised_defs(&self.detected_stacks);
         json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -866,7 +998,7 @@ impl McpServer {
     }
 
     fn respond_tools_list(&self, id: Value) -> Value {
-        let defs = self.tool_defs_visible(&self.detected_stacks);
+        let defs = self.advertised_defs(&self.detected_stacks);
         json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -895,7 +1027,10 @@ impl McpServer {
     }
 
     fn tool_registration(&self, name: &str) -> Option<&ToolRegistration> {
-        self.tools.iter().find(|r| r.def.name == name)
+        let canonical = canonical_tool_name(name);
+        self.tools
+            .iter()
+            .find(|r| r.def.name == canonical || short_name(&r.def.name) == canonical)
     }
 }
 
@@ -1655,8 +1790,125 @@ mod tests {
         assert_eq!(resp["result"]["cacheScope"], MODERN_CACHE_SCOPE);
         let arr = tools.as_array().unwrap();
         assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["name"], "echo");
-        assert_eq!(arr[1]["name"], "fail");
+        assert_eq!(arr[0]["name"], "frg_echo");
+        assert_eq!(arr[1]["name"], "frg_fail");
+    }
+
+    #[test]
+    fn an_advertised_name_keeps_the_tools_own_words() {
+        // The namespace carries identity; the tool name carries the verb. A
+        // name shortened past recognition (`task_create` -> `tasknew`) cannot
+        // be chosen by a model that was never given the mapping.
+        let mut server = make_server();
+        add_echo_tool(&mut server);
+        for def in server.advertised_defs(&[]) {
+            let bare = def
+                .name
+                .strip_prefix("frg_")
+                .unwrap_or_else(|| panic!("no alias on {}", def.name));
+            assert_eq!(
+                bare,
+                short_name(bare),
+                "the advertised name dropped the tool's own words"
+            );
+        }
+        // The namespace is what disambiguates, so it must always be present.
+        assert!(server.advertised_defs(&[])[0].name.starts_with("frg_"));
+    }
+
+    #[test]
+    fn no_advertised_tool_name_is_overly_long() {
+        // The rule the table exists for: brief enough to read at a glance,
+        // long enough to say what the tool does. A name over the budget is a
+        // name that should have been trimmed; one under it that lost its
+        // distinguishing word is worse, and the test below catches that.
+        let mut server = make_server();
+        add_echo_tool(&mut server);
+        for def in server.advertised_defs(&[]) {
+            let bare = def.name.strip_prefix("frg_").unwrap_or(&def.name);
+            assert!(
+                bare.len() <= MAX_TOOL_NAME_LEN,
+                "{:?} is {} chars after the prefix, over the {}-char budget",
+                def.name,
+                bare.len(),
+                MAX_TOOL_NAME_LEN
+            );
+        }
+    }
+
+    #[test]
+    fn a_shortened_name_keeps_its_distinguishing_word() {
+        // `fail_loud_scan` -> `bubble` keeps nothing a model could match on.
+        // Every entry must retain a word from the registered name, so the
+        // mapping is a trim rather than a rename into private slang.
+        let mut server = make_server();
+        add_echo_tool(&mut server);
+        let registered = ["find_definition", "fail_loud_scan", "deps_audit"];
+        for tool in registered {
+            let short = short_name(tool);
+            let shared = short.split('_').any(|word| {
+                tool.split('_')
+                    .any(|orig| orig.starts_with(word) || word.starts_with(orig))
+            });
+            assert!(
+                shared,
+                "{tool} -> {short} shares no word with the registered name"
+            );
+        }
+    }
+
+    #[test]
+    fn every_advertised_tool_carries_the_alias_prefix() {
+        // The model reads `frg_find_definition`, not `find_definition` and not
+        // `mcp__forge__find_definition`: three characters say which server
+        // answered, and the tool's own name starts immediately after.
+        let mut server = make_server();
+        add_echo_tool(&mut server);
+        let advertised = server.advertised_defs(&[]);
+        assert_eq!(advertised[0].name, "frg_echo");
+        // The registered name is untouched — the alias lives on the wire only.
+        assert_eq!(server.tools[0].def.name, "echo");
+    }
+
+    #[test]
+    fn an_advertised_name_is_legal_for_every_openai_shaped_api() {
+        // One illegal character fails the WHOLE request, so the prefix may only
+        // use what `^[a-zA-Z0-9_-]{1,64}$` allows — never the dot spelling.
+        let mut server = make_server();
+        add_echo_tool(&mut server);
+        for def in server.advertised_defs(&[]) {
+            assert!(
+                def.name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "illegal character in advertised name {:?}",
+                def.name
+            );
+            assert!(def.name.len() <= 64, "name over the wire cap: {}", def.name);
+        }
+        assert_eq!(display_name("echo"), "frg.echo", "the human spelling");
+    }
+
+    #[test]
+    fn every_spelling_of_a_tool_name_is_accepted() {
+        // The rename must not break a configured harness: a saved rule, an
+        // agent filter or a live client may still hold any of these.
+        let mut server = make_server();
+        add_echo_tool(&mut server);
+        for requested in [
+            "echo",
+            "frg_echo",
+            "frg.echo",
+            "forge_echo",
+            "mcp__forge__echo",
+        ] {
+            let params = json!({"name": requested, "arguments": {"text": "hi"}});
+            let resp = server.respond_tools_call(json!(1), &params);
+            assert!(
+                resp["result"]["content"].is_array(),
+                "{requested} did not resolve: {resp}"
+            );
+        }
     }
 
     #[test]

@@ -232,7 +232,7 @@ fn tool_aliases_mcp_tool_registered() {
 
     let tool_aliases_tool = tools
         .iter()
-        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("tool_aliases"))
+        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("frg_aliases"))
         .expect("tool_aliases MCP tool not found");
 
     assert_eq!(
