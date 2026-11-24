@@ -82,7 +82,11 @@ frg init --global
 ```
 
 Use `frg init --global --show` to inspect the installed hooks and
-`frg init --global --uninstall` to remove them. The Goose integration is a
+`frg init --global --uninstall` to remove them. Both merge by exact identity:
+they add or remove only the two `Read` entries Forge writes and leave every
+other hook in `settings.json` as it was. Before writing, they copy the file to
+`~/.ferrosa/backups/harness/<timestamp>/`, and they refuse to touch a file
+that is not valid JSON. The Goose integration is a
 repository-local skill at [`integrations/goose/forge`](integrations/goose/forge).
 Configure that directory through the Goose host's normal extension or
 skill-discovery settings.
