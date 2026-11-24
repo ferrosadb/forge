@@ -12,9 +12,16 @@ use crate::excerpt;
 use crate::summarizer::{self, ElementKind};
 
 #[derive(Debug, Serialize)]
+
 pub struct LookupResult {
     pub method: String,
     pub matches: Vec<SymbolMatch>,
+    /// Matches the cap withheld — 0 when the answer is whole.
+    pub omitted: usize,
+    /// What to do about the withheld ones, in terms a model can act on
+    /// without guessing a parameter name (`task_list`'s `next_page` pattern).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_page: Option<String>,
     /// How to get a language server for this project, when the answer fell
     /// back to the source walk and one is missing. `None` when a server
     /// answered, or when the language has no known server.
@@ -67,11 +74,7 @@ pub fn lookup_symbol(symbol: &str, dir: &Path) -> anyhow::Result<LookupResult> {
     // The walk is the floor: it is already finished, so an LSP answer that has
     // not arrived yet adds nothing but latency.
     if let Ok(Some(matches)) = lsp_rx.try_recv() {
-        return Ok(LookupResult {
-            method: "lsp".to_string(),
-            matches,
-            lsp_advice: None,
-        });
+        return Ok(windowed("lsp".to_string(), matches, None));
     }
     Ok(walked)
 }
@@ -140,6 +143,39 @@ pub fn dominant_language(dir: &Path) -> Option<String> {
         .into_iter()
         .max_by_key(|&(_, n)| n)
         .map(|(l, _)| l.to_string())
+}
+
+/// The most matches one lookup returns.
+///
+/// A symbol common enough to appear in hundreds of files is not a lookup — it
+/// is a survey, and returning all of it floods a model's context with rows it
+/// did not ask for. A capped answer that says so is usable; one that silently
+/// stops reads as complete, which is worse than an error.
+pub const MAX_LOOKUP_MATCHES: usize = 50;
+
+/// Trim `matches` to [`MAX_LOOKUP_MATCHES`] and say what was withheld.
+fn windowed(
+    method: String,
+    mut matches: Vec<SymbolMatch>,
+    advice: Option<LspAdvice>,
+) -> LookupResult {
+    let total = matches.len();
+    let omitted = total.saturating_sub(MAX_LOOKUP_MATCHES);
+    if omitted > 0 {
+        matches.truncate(MAX_LOOKUP_MATCHES);
+    }
+    LookupResult {
+        method,
+        matches,
+        omitted,
+        next_page: (omitted > 0).then(|| {
+            format!(
+                "Showing {MAX_LOOKUP_MATCHES} of {total} matches. Narrow the search with a \
+                 more specific symbol name, or pass a `path` to scope it to one directory."
+            )
+        }),
+        lsp_advice: advice,
+    }
 }
 
 /// The language a source extension names, for the servers forge knows.
@@ -228,11 +264,7 @@ fn walk_symbol(symbol: &str, dir: &Path) -> anyhow::Result<LookupResult> {
         }
     }
 
-    Ok(LookupResult {
-        method: "grep".to_string(),
-        lsp_advice: None,
-        matches,
-    })
+    Ok(windowed("grep".to_string(), matches, None))
 }
 
 /// Format lookup results for human/LLM consumption.
@@ -319,6 +351,8 @@ mod tests {
         let result = LookupResult {
             method: "grep".to_string(),
             matches: vec![],
+            omitted: 0,
+            next_page: None,
             lsp_advice: None,
         };
         let out = format_lookup(&result);
@@ -329,6 +363,8 @@ mod tests {
     fn format_lookup_with_matches() {
         let result = LookupResult {
             method: "grep".to_string(),
+            omitted: 0,
+            next_page: None,
             matches: vec![SymbolMatch {
                 file: "src/main.rs".to_string(),
                 line: 42,
@@ -441,6 +477,8 @@ mod tests {
         let result = LookupResult {
             method: "lsp_hint".to_string(),
             matches: vec![],
+            omitted: 0,
+            next_page: None,
             lsp_advice: None,
         };
         let rendered = format_lookup(&result);
@@ -464,6 +502,45 @@ mod tests {
             !rendered.contains("mcp__plugin_"),
             "the answer names a foreign tool namespace: {rendered}"
         );
+    }
+
+    #[test]
+    fn a_lookup_that_hits_the_cap_says_what_it_withheld() {
+        // A symbol common enough to match hundreds of declarations is a survey,
+        // not a lookup. The answer must announce its window — a capped result
+        // that says nothing reads as complete, which is worse than an error.
+        let dir = tempfile::tempdir().expect("temp dir");
+        for i in 0..(MAX_LOOKUP_MATCHES + 10) {
+            std::fs::write(
+                dir.path().join(format!("f{i}.rs")),
+                format!("pub fn common_symbol_{i}() {{}}\n"),
+            )
+            .expect("write");
+        }
+        let result =
+            lookup_symbol_with_lsp_state("common_symbol", dir.path(), None).expect("lookup");
+        assert_eq!(
+            result.matches.len(),
+            MAX_LOOKUP_MATCHES,
+            "the window is the cap"
+        );
+        assert_eq!(result.omitted, 10, "the withheld count is reported");
+        let next = result
+            .next_page
+            .expect("a capped answer must say what to do");
+        assert!(next.contains("Narrow"), "{next}");
+    }
+
+    #[test]
+    fn a_lookup_under_the_cap_announces_nothing() {
+        // Negative control: claiming a window over a complete answer would
+        // teach the model that every answer is partial.
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("a.rs"), "pub fn only_one() {}\n").expect("write");
+        let result = lookup_symbol_with_lsp_state("only_one", dir.path(), None).expect("lookup");
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.omitted, 0);
+        assert!(result.next_page.is_none());
     }
 
     #[test]
