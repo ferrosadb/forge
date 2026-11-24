@@ -10,20 +10,40 @@
 //! filtering, tracking token savings, and setting up Claude Code hooks.
 
 mod aliases;
+mod claude_hooks;
 mod fmem_skill_ingest;
 mod glob;
+mod harness_files;
+mod plugin_cmd;
 
 use fmem_skill_ingest::run_fmem_skill_ingest;
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-/// Canonical hook command string. The hook delegates to `frg hook`
-/// which auto-detects the right filter at runtime.
-const CANONICAL_HOOK_COMMAND: &str = "frg hook 2>/dev/null || true";
-
-/// Hook schema version — bump when the hook format changes.
-const HOOK_SCHEMA_VERSION: &str = "1";
+#[derive(Subcommand)]
+enum PluginAction {
+    /// Register the local marketplace and install the forge plugin with the
+    /// harness's own plugin CLI, verify its MCP server answers, then remove
+    /// the hook entries `frg init --global` wrote (backed up, undoable)
+    Install {
+        /// Harness to install into
+        #[arg(long, value_enum)]
+        harness: plugin_cmd::Harness,
+        /// Marketplace directory holding forge/ (default: `~/.ferrosa/plugins/<version>/forge`)
+        #[arg(long)]
+        plugin_root: Option<PathBuf>,
+        /// Leave the legacy `frg init --global` hook entries in place
+        #[arg(long)]
+        no_migrate: bool,
+    },
+    /// Undo a migration: put back the entries it removed
+    Migrate {
+        /// Backup timestamp printed by the migration (`~/.ferrosa/backups/harness/<ts>`)
+        #[arg(long)]
+        undo: String,
+    },
+}
 
 #[derive(Parser)]
 #[command(name = "frg", version, about = "Token-saving tools for coding agents")]
@@ -256,6 +276,12 @@ enum Commands {
         /// Show current hook status without modifying
         #[arg(long)]
         show: bool,
+    },
+
+    /// Install the forge plugin into a coding agent harness, through its own CLI
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
     },
 
     /// Scan project and suggest optimization opportunities with estimated savings
@@ -1475,104 +1501,6 @@ fn track_run_outcome(o: &RunOutcome) {
     if let Err(e) = outcome {
         eprintln!("frg: tracking disabled: {e}");
     }
-}
-
-/// Generate Claude Code hook configuration JSON using the thin delegator pattern.
-fn generate_hook_config() -> serde_json::Value {
-    serde_json::json!({
-        "hooks": {
-            "PreToolUse": [
-                {
-                    "matcher": "Read",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": CANONICAL_HOOK_COMMAND
-                        }
-                    ]
-                }
-            ],
-            "PostToolUse": [
-                {
-                    "matcher": "Read",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": CANONICAL_HOOK_COMMAND
-                        }
-                    ]
-                }
-            ]
-        }
-    })
-}
-
-/// True when a hook command runs `frg hook`, bare or by path.
-///
-/// Forge's hook is recognized by its command, never by the word "forge":
-/// the MCP server entry is named `forge`, users name their own scripts
-/// `forge-*`, and the installed command itself is `frg hook ...` (#20).
-fn runs_frg_hook(command: &str) -> bool {
-    let command = command.trim_start();
-    command.starts_with("frg hook") || command.contains("/frg hook")
-}
-
-/// Commands of every Forge hook installed in a Claude Code settings value.
-fn forge_hook_commands(settings: &serde_json::Value) -> Vec<&str> {
-    ["PreToolUse", "PostToolUse"]
-        .into_iter()
-        .filter_map(|phase| settings["hooks"][phase].as_array())
-        .flatten()
-        .filter_map(|entry| entry["hooks"].as_array())
-        .flatten()
-        .filter_map(|hook| hook["command"].as_str())
-        .filter(|command| runs_frg_hook(command))
-        .collect()
-}
-
-/// `current` when every installed Forge hook uses the canonical command,
-/// `outdated` when any differs, `not_installed` when there is none.
-fn installed_hook_status(settings: &serde_json::Value) -> &'static str {
-    let commands = forge_hook_commands(settings);
-    if commands.is_empty() {
-        "not_installed"
-    } else if commands
-        .iter()
-        .all(|command| *command == CANONICAL_HOOK_COMMAND)
-    {
-        "current"
-    } else {
-        "outdated"
-    }
-}
-
-/// Remove Forge's hooks and return how many were removed. Other hooks stay,
-/// including ones that share a matcher entry with Forge's; an entry is
-/// dropped only when removing Forge's hook leaves it empty.
-fn remove_forge_hooks(settings: &mut serde_json::Value) -> usize {
-    let mut removed = 0;
-    for phase in ["PreToolUse", "PostToolUse"] {
-        // `get_mut`, not `settings["hooks"]`: indexing mutably would add a
-        // `"hooks": null` key to a settings file that has no hooks.
-        let Some(entries) = settings
-            .get_mut("hooks")
-            .and_then(|hooks| hooks.get_mut(phase))
-            .and_then(|v| v.as_array_mut())
-        else {
-            continue;
-        };
-        entries.retain_mut(|entry| {
-            let Some(hooks) = entry.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
-                return true;
-            };
-            let before = hooks.len();
-            hooks.retain(|hook| !hook["command"].as_str().is_some_and(runs_frg_hook));
-            let dropped = before - hooks.len();
-            removed += dropped;
-            dropped == 0 || !hooks.is_empty()
-        });
-    }
-    removed
 }
 
 fn handle_dsm(action: DsmAction, pretty: bool) -> anyhow::Result<()> {
@@ -5415,111 +5343,35 @@ fn main() -> anyhow::Result<()> {
             uninstall,
             show,
         } => {
+            let home = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
             let settings_path = if global {
-                dirs::home_dir()
-                    .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
-                    .join(".claude")
-                    .join("settings.json")
+                home.join(".claude").join("settings.json")
             } else {
                 PathBuf::from(".claude").join("settings.json")
             };
-
-            if show {
-                if settings_path.exists() {
-                    let content = std::fs::read_to_string(&settings_path)?;
-                    let parsed = serde_json::from_str::<serde_json::Value>(&content);
-                    let hook_status = parsed
-                        .as_ref()
-                        .map_or("not_installed", installed_hook_status);
-
-                    let mut result = serde_json::json!({
-                        "settings_path": settings_path.display().to_string(),
-                        "forge_hooks_installed": hook_status != "not_installed",
-                        "hook_status": hook_status,
-                        "hook_schema_version": HOOK_SCHEMA_VERSION,
-                    });
-
-                    if parsed.is_err() {
-                        result["note"] = serde_json::Value::String(
-                            "Settings file is not valid JSON".to_string(),
-                        );
-                    }
-
-                    if hook_status == "outdated" {
-                        result["message"] = serde_json::Value::String(
-                            "Installed hook uses old format. Run `frg init --global` to upgrade."
-                                .to_string(),
-                        );
-                    }
-
-                    println!("{}", serde_json::to_string_pretty(&result)?);
-                } else {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "settings_path": settings_path.display().to_string(),
-                            "forge_hooks_installed": false,
-                            "hook_status": "not_installed",
-                            "note": "Settings file does not exist"
-                        })
-                    );
-                }
-                return Ok(());
-            }
-
-            if uninstall {
-                if settings_path.exists() {
-                    let content = std::fs::read_to_string(&settings_path)?;
-                    if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
-                        remove_forge_hooks(&mut settings);
-                        let out = serde_json::to_string_pretty(&settings)?;
-                        std::fs::write(&settings_path, out)?;
-                        println!("Removed forge hooks from {}", settings_path.display());
-                    }
-                } else {
-                    println!("No settings file found at {}", settings_path.display());
-                }
-                return Ok(());
-            }
-
-            // Install hooks
-            let hook_config = generate_hook_config();
-
-            if settings_path.exists() {
-                let content = std::fs::read_to_string(&settings_path)?;
-                let mut settings: serde_json::Value =
-                    serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
-
-                // Merge hooks for all phases
-                if let Some(new_hooks) = hook_config.get("hooks") {
-                    if settings.get("hooks").is_none() {
-                        settings["hooks"] = serde_json::json!({});
-                    }
-                    for phase in ["PreToolUse", "PostToolUse"] {
-                        if let Some(phase_hooks) = new_hooks.get(phase) {
-                            settings["hooks"][phase] = phase_hooks.clone();
-                        }
-                    }
-                }
-
-                let out = serde_json::to_string_pretty(&settings)?;
-                std::fs::write(&settings_path, out)?;
+            let mode = if show {
+                claude_hooks::InitMode::Show
+            } else if uninstall {
+                claude_hooks::InitMode::Uninstall
             } else {
-                // Create directory and write new settings
-                if let Some(parent) = settings_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let out = serde_json::to_string_pretty(&hook_config)?;
-                std::fs::write(&settings_path, out)?;
-            }
+                claude_hooks::InitMode::Install
+            };
+            claude_hooks::run_init(&home, &settings_path, global, mode)?;
+        }
 
-            let scope = if global { "global" } else { "project" };
-            println!(
-                "Installed forge hooks ({}) at {}",
-                scope,
-                settings_path.display()
-            );
-            println!("Restart Claude Code to activate hooks.");
+        Commands::Plugin { action } => {
+            let home = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+            let report = match action {
+                PluginAction::Install {
+                    harness,
+                    plugin_root,
+                    no_migrate,
+                } => plugin_cmd::install(&home, harness, plugin_root, !no_migrate)?,
+                PluginAction::Migrate { undo } => plugin_cmd::undo(&home, &undo)?,
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
 
         Commands::Discover { dir } => {
@@ -6847,7 +6699,7 @@ mod ferrosa_memory_config_tests {
 
 #[cfg(test)]
 mod token_bloat_tests {
-    use super::{filter_output, generate_hook_config};
+    use super::filter_output;
 
     #[test]
     fn filtering_never_returns_more_bytes_than_the_raw_output() {
@@ -6873,80 +6725,13 @@ mod token_bloat_tests {
 
     #[test]
     fn generated_hooks_do_not_append_a_second_copy_of_bash_output() {
-        let config = generate_hook_config();
+        let config = crate::claude_hooks::fresh_settings();
         let post_hooks = config["hooks"]["PostToolUse"]
             .as_array()
             .expect("PostToolUse hook list");
         assert!(post_hooks
             .iter()
             .all(|hook| hook["matcher"].as_str() != Some("Bash")));
-    }
-}
-
-#[cfg(test)]
-mod init_hook_tests {
-    use super::{
-        generate_hook_config, installed_hook_status, remove_forge_hooks, CANONICAL_HOOK_COMMAND,
-    };
-    use serde_json::json;
-
-    // Regression tests for #20: Forge's hook is recognized by its `frg hook`
-    // command, never by the word "forge" appearing anywhere in the settings.
-
-    #[test]
-    fn freshly_generated_hooks_report_current() {
-        assert_eq!(installed_hook_status(&generate_hook_config()), "current");
-    }
-
-    #[test]
-    fn mcp_server_entry_alone_is_not_an_installed_hook() {
-        let settings = json!({
-            "mcpServers": {"forge": {"command": "/usr/local/bin/frg", "args": ["--mcp"]}}
-        });
-        assert_eq!(installed_hook_status(&settings), "not_installed");
-    }
-
-    #[test]
-    fn a_non_canonical_frg_hook_command_reports_outdated() {
-        let settings = json!({"hooks": {"PostToolUse": [
-            {"matcher": "Read", "hooks": [{"type": "command", "command": "/opt/bin/frg hook"}]}
-        ]}});
-        assert_eq!(installed_hook_status(&settings), "outdated");
-    }
-
-    #[test]
-    fn uninstall_removes_forge_hooks_and_keeps_everything_else() {
-        let user_entry = json!({"matcher": "Write", "hooks": [
-            {"type": "command", "command": "~/bin/forge-format.sh"}
-        ]});
-        let mut settings = generate_hook_config();
-        settings["hooks"]["PostToolUse"]
-            .as_array_mut()
-            .expect("PostToolUse list")
-            .push(user_entry.clone());
-        settings["mcpServers"] = json!({"forge": {"command": "frg", "args": ["--mcp"]}});
-
-        assert_eq!(remove_forge_hooks(&mut settings), 2);
-        assert_eq!(installed_hook_status(&settings), "not_installed");
-        assert_eq!(settings["hooks"]["PreToolUse"], json!([]));
-        assert_eq!(settings["hooks"]["PostToolUse"], json!([user_entry]));
-        assert_eq!(settings["mcpServers"]["forge"]["command"], "frg");
-    }
-
-    #[test]
-    fn uninstall_keeps_a_user_hook_sharing_a_matcher_with_forge() {
-        let mut settings = json!({"hooks": {"PostToolUse": [{"matcher": "Read", "hooks": [
-            {"type": "command", "command": CANONICAL_HOOK_COMMAND},
-            {"type": "command", "command": "~/bin/audit-read.sh"}
-        ]}]}});
-
-        assert_eq!(remove_forge_hooks(&mut settings), 1);
-        assert_eq!(
-            settings["hooks"]["PostToolUse"],
-            json!([{"matcher": "Read", "hooks": [
-                {"type": "command", "command": "~/bin/audit-read.sh"}
-            ]}])
-        );
     }
 }
 

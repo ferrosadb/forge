@@ -1,0 +1,41 @@
+#!/bin/sh
+# frg-mcp: start the installed frg's MCP server for the forge plugin.
+#
+# The plugin ships no binary (harness-plugins B2): it runs the frg the
+# installer put on this machine, and fails loudly when there is none.
+#
+# Resolution, first match wins:
+#   1. $FORGE_BIN, when set. Set but not executable is an error, never a
+#      reason to try another frg.
+#   2. frg on PATH, the same one the plugin's `frg hook` hooks run.
+#   3. ~/.ferrosa/bin, ~/.cargo/bin and Homebrew's bin, for harnesses started
+#      from the GUI with a short PATH.
+# Nothing found: exit 127 with how to install frg.
+set -eu
+
+say() { printf 'forge plugin: %s\n' "$*" >&2; }
+
+if [ -n "${FORGE_BIN:-}" ]; then
+  if [ -f "$FORGE_BIN" ] && [ -x "$FORGE_BIN" ]; then
+    exec "$FORGE_BIN" --mcp "$@"
+  fi
+  say "FORGE_BIN is $FORGE_BIN, which is not an executable file."
+  exit 127
+fi
+
+if found=$(command -v frg 2>/dev/null) && [ -n "$found" ]; then
+  exec "$found" --mcp "$@"
+fi
+
+for dir in "${FERROSA_HOME:-$HOME/.ferrosa}/bin" "$HOME/.cargo/bin" \
+  /opt/homebrew/bin /usr/local/bin /home/linuxbrew/.linuxbrew/bin; do
+  if [ -f "$dir/frg" ] && [ -x "$dir/frg" ]; then
+    exec "$dir/frg" --mcp "$@"
+  fi
+done
+
+say "frg is not installed, so the forge MCP server cannot start."
+say "Install it with the Ferrosa installer, 'brew install ferrosadb/tap/forge',"
+say "or 'cargo install --locked --git https://github.com/ferrosadb/forge forge',"
+say "or set FORGE_BIN to the frg you want."
+exit 127

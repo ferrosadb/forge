@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "forge": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/frg-mcp",
+      "args": []
+    }
+  }
+}

@@ -12,7 +12,7 @@ path = "src/main.rs"
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
 ignore = { workspace = true }
 jiff = { workspace = true }
 dirs = { workspace = true }
@@ -56,6 +56,5 @@ forge-sheet-sync = { path = "../sheet-sync" }
 toml = { workspace = true }
 globset = "0.4"
 csv = "1"
+tempfile = { workspace = true }
 
-[dev-dependencies]
-tempfile.workspace = true
