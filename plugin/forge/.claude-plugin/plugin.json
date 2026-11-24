@@ -1,0 +1,19 @@
+{
+  "name": "forge",
+  "version": "0.19.0",
+  "description": "frg as an MCP server: structured, token-bounded test, build, lint and log summaries, code analysis, and the Forge task board.",
+  "author": {
+    "name": "Ferrosa",
+    "url": "https://www.ferrosa.ai"
+  },
+  "homepage": "https://github.com/ferrosadb/forge",
+  "repository": "https://github.com/ferrosadb/forge",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "forge",
+    "test-summary",
+    "log-distill",
+    "task-board"
+  ]
+}

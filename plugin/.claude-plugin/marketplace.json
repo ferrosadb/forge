@@ -1,0 +1,16 @@
+{
+  "name": "forge",
+  "owner": {
+    "name": "Ferrosa",
+    "url": "https://www.ferrosa.ai"
+  },
+  "description": "The forge plugin, installed beside frg.",
+  "plugins": [
+    {
+      "name": "forge",
+      "source": "./forge",
+      "version": "0.19.0",
+      "description": "frg as an MCP server: structured, token-bounded test, build, lint and log summaries, code analysis, and the Forge task board."
+    }
+  ]
+}
