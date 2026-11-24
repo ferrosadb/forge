@@ -777,6 +777,24 @@ fn plugin_hooks_are_exactly_what_frg_init_installs() {
     assert_eq!(hooks["hooks"]["PostToolUse"], Value::Array(vec![entry]));
 }
 
+/// Codex 0.171 reads the root Agent Plugins `plugin.json` when it carries
+/// `extensions.com.openai`, and falls back to `.codex-plugin/plugin.json`
+/// only without it (checked against the real codex in a temporary HOME:
+/// `mcpServerStatus/list` reported forge's tools as "part of plugin `Forge`",
+/// the root manifest's displayName). Without the root manifest it falls back
+/// further, to `.claude-plugin/` and `.mcp.json`, whose
+/// `${CLAUDE_PLUGIN_ROOT}` it does not expand. One Codex manifest, no
+/// second copy to drift.
+#[test]
+fn codex_reads_the_root_manifest_and_there_is_no_second_copy() {
+    let plugin = read_json("forge/plugin.json");
+    assert_eq!(
+        plugin["extensions"]["com.openai"]["interface"]["displayName"],
+        "Forge"
+    );
+    assert!(!repo_plugin_root().join("forge/.codex-plugin").exists());
+}
+
 #[test]
 fn codex_gets_no_hooks_and_the_same_server() {
     let plugin = read_json("forge/plugin.json");
