@@ -14,11 +14,36 @@ mod claude_hooks;
 mod fmem_skill_ingest;
 mod glob;
 mod harness_files;
+mod plugin_cmd;
 
 use fmem_skill_ingest::run_fmem_skill_ingest;
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+
+#[derive(Subcommand)]
+enum PluginAction {
+    /// Register the local marketplace and install the forge plugin with the
+    /// harness's own plugin CLI, verify its MCP server answers, then remove
+    /// the hook entries `frg init --global` wrote (backed up, undoable)
+    Install {
+        /// Harness to install into
+        #[arg(long, value_enum)]
+        harness: plugin_cmd::Harness,
+        /// Marketplace directory holding forge/ (default: ~/.ferrosa/plugins/<version>/forge)
+        #[arg(long)]
+        plugin_root: Option<PathBuf>,
+        /// Leave the legacy `frg init --global` hook entries in place
+        #[arg(long)]
+        no_migrate: bool,
+    },
+    /// Undo a migration: put back the entries it removed
+    Migrate {
+        /// Backup timestamp printed by the migration (~/.ferrosa/backups/harness/<ts>)
+        #[arg(long)]
+        undo: String,
+    },
+}
 
 #[derive(Parser)]
 #[command(name = "frg", version, about = "Token-saving tools for coding agents")]
@@ -251,6 +276,12 @@ enum Commands {
         /// Show current hook status without modifying
         #[arg(long)]
         show: bool,
+    },
+
+    /// Install the forge plugin into a coding agent harness, through its own CLI
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
     },
 
     /// Scan project and suggest optimization opportunities with estimated savings
@@ -5327,6 +5358,20 @@ fn main() -> anyhow::Result<()> {
                 claude_hooks::InitMode::Install
             };
             claude_hooks::run_init(&home, &settings_path, global, mode)?;
+        }
+
+        Commands::Plugin { action } => {
+            let home = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+            let report = match action {
+                PluginAction::Install {
+                    harness,
+                    plugin_root,
+                    no_migrate,
+                } => plugin_cmd::install(&home, harness, plugin_root, !no_migrate)?,
+                PluginAction::Migrate { undo } => plugin_cmd::undo(&home, &undo)?,
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
 
         Commands::Discover { dir } => {

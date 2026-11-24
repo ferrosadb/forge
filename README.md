@@ -91,6 +91,35 @@ repository-local skill at [`integrations/goose/forge`](integrations/goose/forge)
 Configure that directory through the Goose host's normal extension or
 skill-discovery settings.
 
+### As a plugin (Claude Code and Codex)
+
+[`plugin/`](plugin) is a local plugin marketplace named `forge` holding the
+`forge` plugin: the `frg --mcp` server, started through
+`scripts/frg-mcp` (which runs the installed `frg` and exits 127 with
+instructions when there is none), and for Claude Code the same two `Read`
+hooks `frg init --global` installs. Codex gets the MCP server and no hooks.
+
+```sh
+frg plugin install --harness claude-code --plugin-root path/to/forge/plugin
+frg plugin install --harness codex --plugin-root path/to/forge/plugin
+```
+
+This registers the marketplace and installs the plugin with the harness's own
+CLI (`claude plugin ...`, `codex plugin ...`), then checks that the plugin is
+enabled at the marketplace's version and that its MCP server answers. Running
+it again changes nothing. Without `--plugin-root` it uses
+`~/.ferrosa/plugins/<frg version>/forge`, where the Ferrosa installer puts the
+tree. A marketplace already named `forge` at another path is left alone and
+reported.
+
+Once the plugin verifies, the hook entries `frg init --global` wrote are
+removed from `~/.claude/settings.json`: only exact matches, after a backup to
+`~/.ferrosa/backups/harness/<timestamp>/`, recorded in that directory's
+`report.json`. `frg plugin migrate --undo <timestamp>` puts them back. Pass
+`--no-migrate` to keep them. A `forge` MCP server another installer registered
+(`~/.claude.json`, `~/.mcp.json`, `~/.codex/config.toml`) is not removed; the
+report lists it with the command that removes it.
+
 ### Uninstall
 
 1. Remove the hooks with `frg init --global --uninstall`, and with

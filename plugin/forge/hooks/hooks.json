@@ -1,0 +1,27 @@
+{
+  "description": "The hooks frg init --global installs: suggest frg digest or frg excerpt before a very large Read.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "frg hook 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "frg hook 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

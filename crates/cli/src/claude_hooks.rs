@@ -190,6 +190,29 @@ pub fn uninstall(settings: &mut Value) -> anyhow::Result<usize> {
     Ok(removed)
 }
 
+/// Put one entry back under `phase` (the undo of a migration), unless an
+/// identical entry is already there. Returns whether the settings changed.
+pub fn restore_entry(settings: &mut Value, phase: &str, entry: &Value) -> anyhow::Result<bool> {
+    validate(settings)?;
+    let root = settings
+        .as_object_mut()
+        .context("settings is not an object")?;
+    let list = root
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .context("hooks is not an object")?
+        .entry(phase)
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .with_context(|| format!("hooks.{phase} is not an array"))?;
+    if list.contains(entry) {
+        return Ok(false);
+    }
+    list.push(entry.clone());
+    Ok(true)
+}
+
 /// The settings `frg init` writes to a file that does not exist yet.
 #[cfg(test)]
 pub fn fresh_settings() -> Value {
