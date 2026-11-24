@@ -30,7 +30,7 @@ enum PluginAction {
         /// Harness to install into
         #[arg(long, value_enum)]
         harness: plugin_cmd::Harness,
-        /// Marketplace directory holding forge/ (default: ~/.ferrosa/plugins/<version>/forge)
+        /// Marketplace directory holding forge/ (default: `~/.ferrosa/plugins/<version>/forge`)
         #[arg(long)]
         plugin_root: Option<PathBuf>,
         /// Leave the legacy `frg init --global` hook entries in place
@@ -39,7 +39,7 @@ enum PluginAction {
     },
     /// Undo a migration: put back the entries it removed
     Migrate {
-        /// Backup timestamp printed by the migration (~/.ferrosa/backups/harness/<ts>)
+        /// Backup timestamp printed by the migration (`~/.ferrosa/backups/harness/<ts>`)
         #[arg(long)]
         undo: String,
     },
