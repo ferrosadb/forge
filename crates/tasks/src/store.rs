@@ -175,34 +175,64 @@ impl TaskStore {
     /// `cql_hosts` are the bootstrap contact points: passing every node lets the
     /// driver start from whichever is up and fail over for queries, so the board
     /// survives a single node loss instead of dying with one fixed contact point.
+    ///
+    /// The credential resolves through the usual layers (see the `config`
+    /// module); the hosts are taken as given.
     pub fn connect(cql_hosts: &[String], tenant_id: Option<&str>) -> Result<Self> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("build tokio runtime")?;
-
         anyhow::ensure!(
             !cql_hosts.is_empty(),
             "no CQL contact point configured for the task board -- set --cql-host, \
              FORGE_CQL_HOST, or cql_host in .forge/config.toml / ~/.config/forge.toml"
         );
-        let hosts = cql_hosts.to_vec();
-        // Every failure below names the contact points actually tried. Without
-        // it the operator is told "connect to CQL: Connection refused" and has
-        // no way to know WHICH host that was -- the flag, the environment
-        // variable, the project config or the global config may each have
-        // supplied it.
+        let target = crate::config::resolve_board_target_for_hosts(cql_hosts)?;
+        Self::connect_to(&target, tenant_id)
+    }
+
+    /// Resolve the board's hosts and credential from the flag/argument
+    /// (`explicit_host`), the environment and the config files, and connect.
+    /// This is what every CLI command and MCP tool uses: unlike [`Self::connect`]
+    /// it knows which layer supplied the host, so a failure can name it.
+    pub fn open(explicit_host: Option<&str>, tenant_id: Option<&str>) -> Result<Self> {
+        let target = crate::config::resolve_board_target(explicit_host)?;
+        Self::connect_to(&target, tenant_id)
+    }
+
+    /// Connect to a fully resolved board target.
+    pub fn connect_to(
+        target: &crate::config::BoardTarget,
+        tenant_id: Option<&str>,
+    ) -> Result<Self> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build tokio runtime")?;
+
+        let hosts = target.hosts.clone();
+        // Every failure below names the contact points actually tried, AND which
+        // configuration supplied them and the credential, and the role. Without
+        // it the operator is told "Authentication failed - bad credentials" and
+        // has no way to know WHICH host or WHOSE credential that was -- the flag,
+        // the environment, the project config, the global config or the built-in
+        // development default may each have supplied them (t_84fde1ee). The
+        // description is in the OUTERMOST context because MCP tools report only
+        // the top-level message.
         let contacted = hosts.join(", ");
+        let provenance = target.describe();
+        let credential = &target.credential;
         let session: Session = rt
             .block_on(async {
                 SessionBuilder::new()
                     .known_nodes(&hosts)
-                    .user("ferrosa_admin", "ferrosa_admin")
+                    .user(credential.username(), credential.password())
                     .build()
                     .await
             })
             .with_context(|| {
-                format!("cannot reach the task board at {contacted} (CQL contact points tried)")
+                format!(
+                    "cannot reach the task board at {contacted} as role {} (CQL contact points \
+                     tried) -- {provenance}",
+                    credential.username()
+                )
             })?;
 
         let session = Arc::new(session);
@@ -219,7 +249,7 @@ impl TaskStore {
             let failure = classify_schema_failure(&format!("{error:#}"));
             error.context(format!(
                 "connected to {contacted}, but could not verify the task board schema in \
-                 '{BOARD_KEYSPACE}' -- {}",
+                 '{BOARD_KEYSPACE}' -- {} ({provenance})",
                 failure.advice()
             ))
         })?;

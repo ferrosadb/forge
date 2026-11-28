@@ -277,6 +277,38 @@ previously only reach forge by asking the user to export a variable or by
 dropping a file into every repo they own. Anything else met
 `connect to CQL ... Connection refused` against a database that was running fine.
 
+#### The board's CQL login
+
+The login resolves through the same layers, from the same files, first match
+wins:
+
+1. `FORGE_CQL_USERNAME` + `FORGE_CQL_PASSWORD_FILE` in the environment
+2. `cql_username` + `cql_password_file` in the nearest `.forge/config.toml`
+3. `cql_username` + `cql_password_file` in `~/.config/forge.toml`
+4. the built-in development credential, `ferrosa_admin`, with the password
+   Ferrosa seeds for it in `FERROSA_MODE=development`
+
+```toml
+# ~/.config/forge.toml
+cql_host = "127.0.0.1:9042"
+cql_username = "ferrosa_admin"
+cql_password_file = "/Users/me/.ferrosa/config/cql-admin.secret"
+```
+
+`cql_password_file` is a **path** to a file holding only the password (a
+trailing newline is trimmed); a relative path is resolved against the directory
+of the config file that names it. Keep it `chmod 600`: a file readable by group
+or other is used, with a warning. A password file that is missing, unreadable or
+empty is an error naming the file, and a layer that sets the username without
+the password file (or the reverse) is an error naming the layer. There is no key
+for the password itself: `cql_password` in a config file is refused.
+
+Every connect or login failure names which setting supplied the host and which
+supplied the credential, and the role, for example
+`... -- host 127.0.0.1:9042 from /Users/me/.config/forge.toml; role ferrosa_admin from /Users/me/.config/forge.toml`,
+or `no config found, used built-in defaults: host 127.0.0.1:9042, built-in development credential ferrosa_admin`.
+The password is never printed.
+
 ### Google Sheets sync
 
 Two-way sync between a Google Sheet of bugs and the CQL task board. See [Google Sheets sync](#google-sheets-sync-1) for setup.
