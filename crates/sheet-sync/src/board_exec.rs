@@ -13,7 +13,7 @@
 
 use crate::board::BoardSink;
 use crate::board_plan::BoardOp;
-use forge_tasks::{resolve_cql_hosts, TaskStatus, TaskStore, UpdateTaskPatch};
+use forge_tasks::{TaskStatus, TaskStore, UpdateTaskPatch};
 
 /// [`BoardSink`] backed by a live `forge_tasks::TaskStore` (CQL).
 pub struct BoardExec {
@@ -21,13 +21,13 @@ pub struct BoardExec {
 }
 
 impl BoardExec {
-    /// Connects to the CQL cluster via `forge_tasks::resolve_cql_hosts`
-    /// (honoring `cql_host`, then env, then the documented default — see
-    /// that function's doc) and wraps the resulting store. No tenant
-    /// scoping: sheet-sync operates on the default tenant.
+    /// Connects via `forge_tasks::TaskStore::open`: the host honours
+    /// `cql_host`, then env, then the config files, then the documented
+    /// default, and the credential resolves through the same layers (see
+    /// `forge_tasks::resolve_board_target`). No tenant scoping: sheet-sync
+    /// operates on the default tenant.
     pub fn connect(cql_host: Option<&str>) -> anyhow::Result<Self> {
-        let hosts = resolve_cql_hosts(cql_host)?;
-        let store = TaskStore::connect(&hosts, None)?;
+        let store = TaskStore::open(cql_host, None)?;
         Ok(Self { store })
     }
 
